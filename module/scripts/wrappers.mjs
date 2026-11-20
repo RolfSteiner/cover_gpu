@@ -15,6 +15,16 @@
 //    over the canvas by the canvas's place and zoom: in the isometric view of this module the
 //    canvas is also turned, and the HUD is turned with it.
 //
+// PIXI and Foundry, for the mouse while the scene is shown in perspective (see view3d.mjs):
+//  - EventSystem#mapPositionToPoint of PIXI, which turns where the mouse is on the screen into
+//    a place of the picture Foundry has drawn: by the line of sight from the camera through
+//    the mouse. Everything Foundry does with the mouse on the canvas goes by this one.
+//  - Canvas#canvasCoordinatesFromClient and Canvas#clientCoordinatesFromCanvas, which Foundry
+//    uses where it has no event of PIXI's, such as for something dropped on the canvas: the
+//    same, there and back.
+// These three put their answer in place of the wrapped one's while that view is shown, and ask
+// the wrapped one at all other times.
+//
 // PF2E Visioner (github.com/roileaf/pf2e-visioner), where it is active. Visioner works out, for
 // every pair of tokens, how well the one perceives the other and what cover it has from it,
 // and it does so from three answers of its own, each of which gets a wrapper:
@@ -109,6 +119,30 @@ export function wrapFoundry() {
 		const view = layer();
 		return Boolean(view && (view.seenInMirrors(this, points, options) || view.seenOver(points, options)));
 	});
+}
+
+/**
+ * The wrappers for the mouse on the canvas. To be called once, when the canvas is there: the
+ * objects they go on are made with it.
+ */
+export function wrapCanvas() {
+	if (!globalThis.libWrapper) return;
+	if (typeof canvas.app?.renderer?.events?.mapPositionToPoint === 'function') {
+		wrap('canvas.app.renderer.events.mapPositionToPoint', function (wrapped, point, x, y) {
+			if (layer()?.mapPointer(point, x, y)) return undefined;
+			return wrapped(point, x, y);
+		}, 'MIXED');
+	}
+	if (typeof canvas.canvasCoordinatesFromClient === 'function') {
+		wrap('canvas.canvasCoordinatesFromClient', function (wrapped, origin) {
+			return layer()?.sceneFromClient(origin) ?? wrapped(origin);
+		}, 'MIXED');
+	}
+	if (typeof canvas.clientCoordinatesFromCanvas === 'function') {
+		wrap('canvas.clientCoordinatesFromCanvas', function (wrapped, origin) {
+			return layer()?.clientFromScene(origin) ?? wrapped(origin);
+		}, 'MIXED');
+	}
 }
 
 /**

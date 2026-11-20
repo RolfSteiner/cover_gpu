@@ -9,7 +9,7 @@ import { CoverViewLayer } from './layer.mjs';
 import { quadtreeJson } from './quadtree.mjs';
 import { LAYER, MODULE_ID, registerSettings } from './settings.mjs';
 import { addSurfaceFields } from './wall-config.mjs';
-import { wrapFoundry, wrapVisioner } from './wrappers.mjs';
+import { wrapCanvas, wrapFoundry, wrapVisioner } from './wrappers.mjs';
 
 Hooks.once('init', () => {
 	registerSettings((key) => canvas[LAYER]?.optionChanged(key));
@@ -38,6 +38,7 @@ Hooks.once('init', () => {
 // the game is ready and Visioner with it.
 Hooks.once('setup', wrapFoundry);
 Hooks.once('ready', wrapVisioner);
+Hooks.once('canvasReady', wrapCanvas);
 
 // A wall enters, moves in or leaves the quadtree when it is drawn, refreshed or destroyed, a
 // moment after the hook; the same hooks fire for changes that leave the tree as it is, which

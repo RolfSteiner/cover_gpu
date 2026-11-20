@@ -135,7 +135,8 @@ export function viewedFloors() {
 	const level = canvas.level;
 	const base = (range) => (Number.isFinite(range?.base) ? range.base : range?.bottom);
 	let ground = said(base(level?.elevation), 0);
-	for (const id of level?.visibility?.levels ?? []) {
+	// a level with a picture of its own has a floor all over: nothing is seen below it
+	for (const id of (level?.background?.src ? [] : level?.visibility?.levels ?? [])) {
 		const below = base(canvas.scene?.levels?.get?.(id)?.elevation);
 		if (Number.isFinite(below)) ground = Math.min(ground, below);
 	}
@@ -143,36 +144,100 @@ export function viewedFloors() {
 	return { ground: ground * per, ceiling: said(level?.elevation?.top, Infinity) * per };
 }
 
+/** The triangles of the area of a surface of Scene#getSurfaces, six numbers each (the x and y of three corners). */
+function trianglesOf(surface) {
+	const { vertices, indices } = surface.region?.triangulation ?? {};
+	const t = [];
+	if (!vertices || !indices?.length) return t;
+	for (let i = 0; i + 2 < indices.length; i += 3) {
+		const corners = [0, 1, 2].flatMap((k) => [Math.round(vertices[indices[i + k] * 2] * 10) / 10, Math.round(vertices[indices[i + k] * 2 + 1] * 10) / 10]);
+		// a triangle without an area covers nothing
+		if ((corners[2] - corners[0]) * (corners[5] - corners[1]) === (corners[3] - corners[1]) * (corners[4] - corners[0])) continue;
+		t.push(...corners);
+	}
+	return t;
+}
+
 /**
  * The flat surfaces of the viewed level that stop anything: `{ z, light, move, sight, t }` each,
  * with `z` the height in scene pixels, `light`, `move` and `sight` 1 where the surface stops
  * that, and `t` the triangles of its area, six numbers each (the x and y of three corners).
  * @param {boolean} [everyLevel] true for the surfaces of the whole scene. One whose region is
- *   not part of the viewed level then says `noFloor`: 1: it stops what it stops, but is no
- *   floor that is seen while this level is viewed
+ *   not part of `level` then says `noFloor`: 1: it stops what it stops, but is no floor of
+ *   that level
+ * @param {Level} [level] the level the floors are asked for; the viewed level if left out
  * @returns {object[]}
  */
-export function surfaceList(everyLevel = false) {
+export function surfaceList(everyLevel = false, level = canvas.level ?? null) {
 	const scene = canvas.scene;
 	if (typeof scene?.getSurfaces !== 'function') return [];
 	const per = perUnit();
 	const list = [];
-	const viewed = canvas.level ?? null;
-	for (const surface of scene.getSurfaces(viewed && !everyLevel ? { level: viewed } : {})) {
+	for (const surface of scene.getSurfaces(level && !everyLevel ? { level } : {})) {
 		if (!Number.isFinite(surface.elevation) || !(surface.light || surface.move || surface.sight)) continue;
-		const { vertices, indices } = surface.region?.triangulation ?? {};
-		if (!vertices || !indices?.length) continue;
-		const t = [];
-		for (let i = 0; i + 2 < indices.length; i += 3) {
-			const corners = [0, 1, 2].flatMap((k) => [Math.round(vertices[indices[i + k] * 2] * 10) / 10, Math.round(vertices[indices[i + k] * 2 + 1] * 10) / 10]);
-			// a triangle without an area covers nothing
-			if ((corners[2] - corners[0]) * (corners[5] - corners[1]) === (corners[3] - corners[1]) * (corners[4] - corners[0])) continue;
-			t.push(...corners);
-		}
+		const t = trianglesOf(surface);
 		if (!t.length) continue;
 		const entry = { z: Math.round(surface.elevation * per * 100) / 100, light: surface.light ? 1 : 0, move: surface.move ? 1 : 0, sight: surface.sight ? 1 : 0, t };
-		if (everyLevel && viewed && surface.region?.includedInLevel?.(viewed) === false) entry.noFloor = 1;
+		if (everyLevel && level && surface.region?.includedInLevel?.(level) === false) entry.noFloor = 1;
 		list.push(entry);
+	}
+	return list;
+}
+
+/**
+ * The levels of the scene, the lowest first: `{ id, level, base, top, viewed, lowest, plane,
+ * image, color }` each. `base` and `top` are the heights it reaches from and to, in scene
+ * pixels. `plane` says that the level has a floor all over, at its base: the lowest level has,
+ * as the ground of the scene, and so has a level with a picture of its own (`image`, the
+ * address of that picture; `color` is what the level shows where it has none, as red, green
+ * and blue from 0 to 1). A scene without levels is one level that has it all.
+ * @returns {object[]}
+ */
+export function sceneLevels() {
+	const per = perUnit();
+	const list = [];
+	for (const level of canvas.scene?.levels?.values?.() ?? []) {
+		const range = level.elevation ?? {};
+		const base = said(Number.isFinite(range.base) ? range.base : range.bottom, 0);
+		const color = level.background?.color;
+		list.push({ id: level.id, level, base: base * per, top: said(range.top, Infinity) * per, viewed: level === canvas.level || (canvas.level?.id !== undefined && level.id === canvas.level.id),
+			image: level.background?.src || null,
+			color: color?.rgb ? Array.from(color.rgb) : (typeof color === 'string' && foundry.utils.Color ? Array.from(foundry.utils.Color.from(color).rgb) : [0.6, 0.6, 0.6]) });
+	}
+	list.sort((p, q) => p.base - q.base);
+	if (!list.some((entry) => entry.viewed)) {
+		// the viewed level is none of the scene's (or the scene has none): it is a level by itself
+		list.push({ id: canvas.level?.id ?? null, level: canvas.level ?? null, base: floorHeight(), top: said(canvas.level?.elevation?.top, Infinity) * per, viewed: true, image: null, color: [0.6, 0.6, 0.6] });
+		list.sort((p, q) => p.base - q.base);
+	}
+	list.forEach((entry, i) => {
+		entry.lowest = i === 0;
+		entry.plane = entry.lowest || Boolean(entry.image);
+	});
+	return list;
+}
+
+/**
+ * Every flat surface of the scene, with the levels it is a floor of: `{ z, t, move, of }` each,
+ * `of` holding the ids of those of `levels` (as `sceneLevels` gives them) whose floor it is:
+ * a surface that stops movement, whose region is part of the level, at a height within the
+ * level.
+ * @param {object[]} levels
+ * @returns {object[]}
+ */
+export function surfacesByLevel(levels) {
+	const scene = canvas.scene;
+	if (typeof scene?.getSurfaces !== 'function') return [];
+	const per = perUnit();
+	const list = [];
+	for (const surface of scene.getSurfaces({})) {
+		if (!Number.isFinite(surface.elevation) || !(surface.light || surface.move || surface.sight)) continue;
+		const t = trianglesOf(surface);
+		if (!t.length) continue;
+		const z = Math.round(surface.elevation * per * 100) / 100;
+		const of = !surface.move ? [] : levels.filter((entry) => z >= entry.base - 0.5 && z < entry.top - 0.5
+			&& (!entry.level || surface.region?.includedInLevel?.(entry.level) !== false)).map((entry) => entry.id);
+		list.push({ z, t, move: surface.move ? 1 : 0, of });
 	}
 	return list;
 }

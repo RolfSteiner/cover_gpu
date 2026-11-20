@@ -34,7 +34,12 @@
 // on from above. So the lights and the tokens with a light that Foundry has not set up are read
 // from the scene (`#elsewhere`), and all the scene's walls and surfaces are in the way of the
 // light (see layer.mjs, `refreshTree`). A light that Foundry has not set up has no meshes
-// either, and so no animation: all of its light is in the picture. Each source is at its own height, a wall stops light
+// either, and so no animation: all of its light is in the picture.
+//
+// The picture in Foundry's lighting is that of the viewed level. For the view that shows every
+// level at once (view3d.mjs), the light on the floors of each other level is traced as well,
+// into a picture of its own per level (`levelPictures`), with all the light of each source in
+// it. Those pictures are numbers only; nothing of Foundry's shows them. Each source is at its own height, a wall stops light
 // between its bottom and its top, and the surfaces of regions that stop light are floors and
 // roofs to it: light from a source above a low wall falls over it, and the wall's shadow on
 // the floor is as long as that makes it.
@@ -80,6 +85,18 @@ export class PathTracedLighting {
 	}
 
 	#onTraced;
+
+	/**
+	 * The other levels the light is to be traced for as well, `{ id, json, floor, ceiling }` each
+	 * (the scene as the script reads it with the floors of that level, and the heights its
+	 * floors lie between), and the pictures traced for them, by the id of the level:
+	 * `{ width, height, data, version }`, `data` as `readPicture` of the library gives it.
+	 */
+	#levels = [];
+
+	#pictures = new Map();
+
+	#version = 0;
 
 	/** The script library, the walls as the JSON text it reads, and the bounds of their root cell. */
 	#cover = null;
@@ -136,12 +153,26 @@ export class PathTracedLighting {
 	 * @param {object} cover the script library (lib/test_local_gpu_api.js)
 	 * @param {string} treeJson the walls, as quadtreeJson gives them
 	 * @param {{x: number, y: number, width: number, height: number}} root what the picture covers
+	 * @param {object[]} [levels] the other levels to trace the light for as well, each
+	 *   `{ id, json, floor, ceiling }`
 	 */
-	setWalls(cover, treeJson, root) {
+	setWalls(cover, treeJson, root, levels = []) {
 		this.#cover = cover;
 		this.#treeJson = treeJson;
 		this.#root = root;
+		this.#levels = levels;
 		this.#read(true);
+	}
+
+	/**
+	 * The light on the floors of the other levels, by the id of the level:
+	 * `{ width, height, data, version }` each, `data` four bytes per pixel (red, green, blue,
+	 * 255) starting with the bottom row, over the same area as the picture of the viewed level;
+	 * `version` is another number for every new picture.
+	 * @returns {Map<string, object>}
+	 */
+	get levelPictures() {
+		return this.#pictures;
 	}
 
 	/**
@@ -206,6 +237,8 @@ export class PathTracedLighting {
 		this.#info = null;
 		this.#inputs = '';
 		this.#cover = null;
+		this.#levels = [];
+		this.#pictures = new Map();
 		this.#place();
 		this.#sprite?.destroy();
 		this.#sprite = null;
@@ -310,6 +343,7 @@ export class PathTracedLighting {
 		this.#changedAt = now;
 		if (!sources) {
 			this.#info = null;
+			this.#pictures = new Map();
 			this.#place();
 			return true;
 		}
@@ -330,6 +364,17 @@ export class PathTracedLighting {
 		const info = { count: sources.length, walls: 0, ms: 0, error: '', traced: false, draft, lights: sources.map(({ x, y, z, color }) => ({ x, y, z, color })) };
 		const started = performance.now();
 		try {
+			// The other levels first: the picture of the viewed level is the one that has to be
+			// left on the library's canvas. They are smaller, and not traced for a quick picture.
+			if (!draft) {
+				const pictures = new Map();
+				const small = { ...picture, width: Math.max(64, Math.round(picture.width / 2)), height: Math.max(1, Math.round(picture.height / 2)) };
+				for (const level of this.#levels) {
+					this.#cover.traceLights(level.json, sources.map((source) => ({ ...source, reflectedOnly: false })), { ...small, floor: level.floor, ceiling: level.ceiling });
+					pictures.set(level.id, { ...this.#cover.readPicture(), version: ++this.#version });
+				}
+				this.#pictures = pictures;
+			}
 			info.walls = this.#cover.traceLights(this.#treeJson, sources, picture).walls;
 			info.traced = true;
 		} catch (error) {

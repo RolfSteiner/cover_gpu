@@ -54,11 +54,22 @@ What that changes:
 
 On a scene where nothing names a height, everything is as on a flat map.
 
-The switch "Isometric view" in the scene controls turns the whole canvas so that the scene is
-seen from the side, for the user who sets it. The GM's view then draws what has a height
-standing: walls from bottom to top, floors and roofs where they lie, the tokens of the cover
-test from feet to head, and each traced light at its height. Token and tile art stays flat on
-the map.
+Two switches in the scene controls show the scene from the side, for the user who sets them.
+In both, every token stands as a cylinder from its feet to its head, and with the GM's view
+shown the walls stand from bottom to top, with the floors and roofs where they lie and each
+traced light at its height. Token and tile art stays flat on the map.
+
+- **Isometric view** turns the whole canvas of Foundry.
+- **3D view** shows the scene in perspective, with a camera: drag with the right mouse button
+  to move over the ground, with the middle button (or Shift and the right button) to turn and
+  tilt, and use the wheel to come closer or go away. The left button works as on the map. This
+  view is a picture of its own over Foundry's canvas (`module/scripts/view3d.mjs`). It shows
+  every level of the scene at once: Foundry's flat picture is laid on the floors of the viewed
+  level and on the tokens Foundry has drawn; the floors of the other levels are drawn in the
+  level's own picture or color, lit by the light path traced for them, with their walls and
+  their tokens. The cover test is drawn through the room: on each target's side what is hidden
+  (red) and what is seen (yellow), height by height, with the lines of sight to it. Foundry's
+  HUD is hidden while the view is on.
 
 ## Layout
 

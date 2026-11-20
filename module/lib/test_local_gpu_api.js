@@ -329,9 +329,10 @@ export const cover = {
 	 *   the ends of the source's diameter used for it; `obstructed`: the smallest share of the
 	 *   target that any of the points cannot see, 0 to 1; `points`: per point `at`, `rayA` and
 	 *   `rayB` (the two touching rays, on the map), `rays` (sent), `blocked` (stopped),
-	 *   `obstructed` (blocked / rays) and `runs`: stretches of neighbouring directions of which
-	 *   equally much is blocked, each `{ blocked, share, from, to }` with `share` the blocked
-	 *   share of the heights (`blocked` is true for all of them) and `from` and `to` on the
+	 *   `obstructed` (blocked / rays) and `runs`: stretches of neighbouring directions in which
+	 *   the same heights are blocked, each `{ blocked, share, mask, from, to }`: `mask` has one
+	 *   bit per height, the lowest first, set where that height is hidden; `share` is the blocked
+	 *   share of the heights (`blocked` is true for all of them); `from` and `to` are on the
 	 *   target circle
 	 */
 	testCover(treeJson, source, targets, sourceDiameter, targetDiameter, points, heights = 1) {

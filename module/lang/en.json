@@ -10,7 +10,8 @@
 			"cover": "Cover test: how much of every other token the walls and floors that stop movement hide from the selected token, by the heights of the walls and of the tokens",
 			"lights": "Path trace the light of the scene's light sources, for every user, in place of Foundry's own light. Places the reflected light reaches count as lit for what tokens see",
 			"cells": "Show the quadtree cells and the bounding boxes of the walls",
-			"isometric": "Isometric view: turn the whole scene so that it is seen from the side, with walls, floors, the tokens of the cover test and the path traced lights standing at their heights",
+			"isometric": "Isometric view: turn the whole scene so that it is seen from the side. Every token stands as a cylinder from its feet to its head, and with the view shown the walls, floors and path traced lights stand at their heights",
+			"perspective": "3D view: look at the scene in perspective, with every token as a cylinder. Drag with the right mouse button to move over the ground, with the middle button (or Shift and the right button) to turn and tilt, and use the wheel to come closer or go away. The left button works as on the map",
 			"settings": "Settings",
 			"clear": "Remove all rays"
 		},
@@ -92,6 +93,7 @@
 			"metallicRight": "Metallic, Right Side",
 			"smoothnessRight": "Smoothness, Right Side"
 		},
-		"NoLibWrapper": "Cover: Quadtree View needs the module libWrapper to be active. Without it, light thrown back by walls and mirrors do not count for what tokens see, and PF2E Visioner is not hooked in."
+		"NoLibWrapper": "Cover: Quadtree View needs the module libWrapper to be active. Without it, light thrown back by walls and mirrors do not count for what tokens see, and PF2E Visioner is not hooked in.",
+		"No3D": "The 3D view needs WebGL 2, which this browser would not give it."
 	}
 }

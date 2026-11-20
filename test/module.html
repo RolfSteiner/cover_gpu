@@ -372,7 +372,16 @@ try {
 		visionLight.mask.endFill();
 	};
 	window.canvas = { ready: true, app, stage, scene: sceneDocument, level: { elevation: { base: 0, bottom: 0, top: Infinity } },
-		dimensions: { rect: new PIXI.Rectangle(0, 0, 6000, 4600), size: 100, distance: 5, distancePixels: DPX, maxR: MAX_R / 2 }, walls: {}, tokens,
+		dimensions: { rect: new PIXI.Rectangle(0, 0, 6000, 4600), width: 6000, height: 4600, size: 100, distance: 5, distancePixels: DPX, maxR: MAX_R / 2, scale: { min: 0.05, max: 3 } }, walls: {}, tokens,
+		// Foundry's view of the scene: the place it looks at in the middle of the screen, at a zoom
+		pan({ x, y, scale } = {}) {
+			stage.position.set(app.screen.width / 2, app.screen.height / 2);
+			scale = Math.min(Math.max(scale ?? stage.scale.x, this.dimensions.scale.min), this.dimensions.scale.max);
+			stage.pivot.set(x ?? stage.pivot.x, y ?? stage.pivot.y);
+			stage.scale.set(scale, scale);
+			this.pans = (this.pans ?? 0) + 1;
+			Hooks.callAll('canvasPan', this, { x: stage.pivot.x, y: stage.pivot.y, scale });
+		},
 		effects: new Effects(), visibility: new Visibility(), masks: { vision: { renderDirty: false } },
 		colors, environment: { weights: { dark: 0, halfdark: 0.5, dim: 0.25, bright: 1 } },
 		// as Foundry's: what is asked for is done once, on the next frame, lighting before vision
@@ -407,7 +416,7 @@ try {
 	for (const t of Object.values(controls.tools)) localize(t.title);
 	localize(controls.title);
 	await layer.draw();
-	for (let i = 0; i < 100 && !canvas.coverView.children[5]; i++) await sleep(50);
+	for (let i = 0; i < 100 && !canvas.coverView.children[6]; i++) await sleep(50);
 	await sleep(1500);
 
 	const event = (origin, destination) => ({ interactionData: { origin, destination: destination ?? origin } });
@@ -432,7 +441,7 @@ try {
 		},
 		// what Foundry's hooks would tell the layer about regions
 		regionsChanged: async () => { Hooks.callAll('updateRegion'); await sleep(350); },
-		marks: () => layer.children[4].children.map((m) => m.thing.kind + (m.thing.end ?? '') + (m.thing.ray ? m.thing.ray.number : '')),
+		marks: () => layer.children[5].children.map((m) => m.thing.kind + (m.thing.end ?? '') + (m.thing.ray ? m.thing.ray.number : '')),
 		// what Foundry's hooks would tell the layer about the tokens
 		select: async (token) => { tokens.controlled = token ? [token] : []; drawTokens(); Hooks.callAll('controlToken'); await frame(); },
 		moveToken: async (token, x, y) => { token.x = x; token.y = y; drawTokens(); Hooks.callAll('refreshToken'); await frame(); },
@@ -505,7 +514,7 @@ try {
 			context.drawImage(cover.canvas, 0, 0);
 			return [...context.getImageData(Math.round(x / 6000 * copy.width), Math.round(y / 4600 * copy.height), 1, 1).data].slice(0, 3);
 		},
-		labels: () => layer.children[5].children.map((t) => t.text),
+		labels: () => layer.children[6].children.map((t) => t.text),
 		tool: (name) => { game.activeTool = name; },
 		toggle: (name, on) => controls.tools[name].onChange(null, on),
 		click: (x, y) => layer._onClickLeft(event({ x, y })),

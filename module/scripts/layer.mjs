@@ -22,21 +22,30 @@
 // right on the screen and what lies below runs down to the right (`#applyPerspective`). Every
 // height then has a direction on the screen, straight up, and the view draws what it knows the
 // height of standing: the walls from their bottom to their top, the floors and roofs where
-// they lie, the tokens of the cover test from feet to head, and each traced light at its
-// height.
+// they lie, and each traced light at its height. Every token is drawn as a cylinder from its
+// feet to its head, whether or not the rest of the view is shown.
+//
+// The switch "perspective" shows the scene with a camera that can be moved, turned and brought
+// closer (see view3d.mjs). That is a picture of its own over Foundry's canvas; this layer says
+// what there is to draw in it (`#seen`) and hands the mouse over to it where Foundry asks.
+// While it is on, the canvas itself is not turned. That view shows the whole scene at once:
+// every level with its floors at their heights, the walls and the tokens of all of them, and
+// the cover test as it runs through the room. What of that Foundry has not on the canvas,
+// because it is not part of the viewed level, is read from the scene.
 //
 // The view itself is for the GM. It is shown whichever set of scene controls is active, and its
 // marks can be dragged there too: each mark takes the mouse for itself before the active layer
 // sees it. Only placing a new ray needs the tool of the view's own controls. Results that were
 // tables in the page this replaces are short labels next to the things here.
 
-import { floorHeight, perUnit, surfaceList, tokenHeights } from './heights.mjs';
+import { floorHeight, perUnit, sceneLevels, surfaceList, surfacesByLevel, tokenHeights, viewedFloors, wallHeights } from './heights.mjs';
 import { loadLibrary } from './library.mjs';
 import { PathTracedLighting } from './lighting.mjs';
 import { MirrorVision } from './mirrors.mjs';
-import { quadtreeJson } from './quadtree.mjs';
+import { quadtreeJson, wallSurface } from './quadtree.mjs';
 import { LAYER, NUMBERS, value, setValue } from './settings.mjs';
 import { Obstacles } from './sight.mjs';
+import { View3D } from './view3d.mjs';
 import { refreshVisioner, visionerHooks } from './wrappers.mjs';
 
 const { InteractionLayer } = foundry.canvas.layers;
@@ -58,6 +67,7 @@ const REACH = 14;
 // level on the screen, its y axis as far down.
 const TILT = Math.PI / 6;
 const FLOOR = 0x8fd3ff;
+const PICKED = 0xff9829;
 
 const wallKey = (ax, ay, bx, by) => [ax, ay, bx, by].join(',');
 const distance = (p, q) => Math.hypot(p.x - q.x, p.y - q.y);
@@ -102,6 +112,7 @@ export class CoverViewLayer extends InteractionLayer {
 				toggle('lights', 'fa-solid fa-sun'),
 				toggle('cells', 'fa-solid fa-border-all'),
 				toggle('isometric', 'fa-solid fa-cube'),
+				toggle('perspective', 'fa-solid fa-video'),
 				tool('settings', 'fa-solid fa-sliders', { button: true, onChange: () => canvas[LAYER].editSettings() }),
 				tool('clear', 'fa-solid fa-trash', { button: true, onChange: () => canvas[LAYER].clear() }),
 			]),
@@ -160,6 +171,18 @@ export class CoverViewLayer extends InteractionLayer {
 	/** What tokens see in walls that are mirrors. */
 	#mirrors = new MirrorVision(this.#obstacles);
 
+	/** The scene in perspective, while that view is switched on. */
+	#view3d = new View3D(() => this.#seen());
+
+	/**
+	 * The whole scene as the view in perspective draws it: `{ at, view, levels, surfaces, walls }`,
+	 * with the count of changes and the viewed level it was read at.
+	 */
+	#whole = null;
+
+	/** The scene as the script reads it for each level that is not viewed, as one text: the light is traced again when it changes. */
+	#levelsKey = '';
+
 	/** True once a failure of `seenOver` was reported, so that one that repeats is reported once. */
 	#sightFailed = false;
 
@@ -217,6 +240,7 @@ export class CoverViewLayer extends InteractionLayer {
 			walls: add(new PIXI.Graphics()),
 			cover: add(new PIXI.Graphics()),
 			rays: add(new PIXI.Graphics()),
+			bodies: add(new PIXI.Graphics()),
 			marks: add(new PIXI.Container()),
 			labels: add(new PIXI.Container()),
 		};
@@ -227,6 +251,8 @@ export class CoverViewLayer extends InteractionLayer {
 		// everything has to be drawn again, even on an unchanged tree
 		this.#treeJson = '';
 		this.#lightJson = '';
+		this.#levelsKey = '';
+		this.#whole = null;
 		// ahead of Foundry's perception update, which runs at the priority Foundry names PERCEPTION
 		const perception = PIXI.UPDATE_PRIORITY.PERCEPTION ?? PIXI.UPDATE_PRIORITY.NORMAL + 2;
 		canvas.app?.ticker?.remove(this.#beforePerception, this);
@@ -238,6 +264,7 @@ export class CoverViewLayer extends InteractionLayer {
 	/** @override */
 	async _tearDown(options) {
 		canvas.app?.ticker?.remove(this.#beforePerception, this);
+		this.#view3d.stop();
 		this.#lighting.tearDown();
 		this.#mirrors.tearDown();
 		this.#parts = null;
@@ -266,9 +293,10 @@ export class CoverViewLayer extends InteractionLayer {
 	 * which may be for any user.
 	 */
 	#showOrHide() {
-		this.visible = game.user.isGM && (value('show') || this.active);
+		// the tokens as they stand in the isometric view are drawn on this layer too
+		this.visible = this.#shown || (game.user.isGM && this.#tilted);
 		// PF2E Visioner's cover asks the script library, whether or not anything of the view is shown
-		if (!this.visible && !value('lights') && !visionerHooks().includes('cover')) return;
+		if (!this.#shown && !value('lights') && !visionerHooks().includes('cover')) return;
 		this.#load().then(() => {
 			this.refreshTree();
 			// a view that was hidden has not followed the tokens
@@ -300,12 +328,17 @@ export class CoverViewLayer extends InteractionLayer {
 		// others are read from the scene, and each wall ends where its levels end.
 		const elsewhere = [...(canvas.scene.walls ?? [])].filter((document) => document.viewed === false);
 		const lightJson = quadtreeJson(canvas.walls.quadtree, surfaceList(true), { others: elsewhere, withinLevels: true });
-		if (json === this.#treeJson && lightJson === this.#lightJson) return;
+		// the view in perspective shows every level, and wants the light on the floors of each
+		const others = !value('perspective') ? [] : sceneLevels().filter((entry) => !entry.viewed && entry.level).map((entry) => ({ id: entry.id, floor: entry.base, ceiling: entry.top,
+			json: quadtreeJson(canvas.walls.quadtree, surfaceList(true, entry.level), { others: elsewhere, withinLevels: true }) }));
+		const levelsKey = others.map((entry) => entry.id + entry.json).join('\n');
+		if (json === this.#treeJson && lightJson === this.#lightJson && levelsKey === this.#levelsKey) return;
 		const tree = JSON.parse(json);
 		const root = tree.nodes[tree.root].bounds;
 		if (!(root.width > 0 && root.height > 0)) return;
 		this.#treeJson = json;
 		this.#lightJson = lightJson;
+		this.#levelsKey = levelsKey;
 		this.#surfaces = tree.surfaces ?? [];
 		this.#root = root;
 		this.#shares.clear();
@@ -324,20 +357,33 @@ export class CoverViewLayer extends InteractionLayer {
 		walk(tree.root, 0);
 		for (const ray of this.#rays) this.#runRay(ray);
 		this.#readTokens(true);
-		this.#lighting.setWalls(this.#cover, lightJson, root);
+		this.#lighting.setWalls(this.#cover, lightJson, root, others);
 		this.#redraw();
 	}
 
+	/** True while the view itself is shown: to a GM, while it is switched on or its own controls are active. */
+	get #shown() {
+		return game.user.isGM && (value('show') || this.active);
+	}
+
+	/** True while the canvas is turned for the isometric view; the view in perspective goes before it. */
+	get #tilted() {
+		return value('isometric') && !value('perspective');
+	}
+
 	/**
-	 * Turns the canvas for the isometric view, or back. The stage is turned and sheared, which
-	 * together lay its two axes a third of a right angle up and down from level, at their full
-	 * length. Foundry keeps to the place and the zoom of the stage and leaves the rest alone.
+	 * Turns the canvas for the isometric view, or back, and shows or hides the view in
+	 * perspective. The stage is turned and sheared, which together lay its two axes a third of a
+	 * right angle up and down from level, at their full length. Foundry keeps to the place and
+	 * the zoom of the stage and leaves the rest alone.
 	 * @returns {boolean} true when the canvas was turned
 	 */
 	#applyPerspective() {
 		const stage = canvas.stage;
 		if (!stage) return false;
-		const tilt = value('isometric') ? TILT : 0;
+		if (value('perspective')) this.#view3d.start();
+		else this.#view3d.stop();
+		const tilt = this.#tilted ? TILT : 0;
 		if (stage.rotation === -tilt && stage.skew.x === tilt) return false;
 		stage.rotation = -tilt;
 		stage.skew.set(tilt, 0);
@@ -357,7 +403,7 @@ export class CoverViewLayer extends InteractionLayer {
 	 * scene that runs farthest to the right on the screen.
 	 */
 	get #lie() {
-		const tilt = value('isometric') ? TILT : 0;
+		const tilt = this.#tilted ? TILT : 0;
 		const a = Math.cos(tilt);
 		const b = -Math.sin(tilt);
 		const c = Math.sin(2 * tilt);
@@ -414,7 +460,8 @@ export class CoverViewLayer extends InteractionLayer {
 		this.#tokensQueued = true;
 		requestAnimationFrame(() => {
 			this.#tokensQueued = false;
-			if (this.#readTokens()) this.#redraw();
+			// the tokens as they stand follow every move
+			if (this.#readTokens() || this.#tilted) this.#redraw();
 		});
 	}
 
@@ -430,7 +477,7 @@ export class CoverViewLayer extends InteractionLayer {
 	#readTokens(anyway = false) {
 		if (!this.#usable) return false;
 		// nothing is tested for a hidden view
-		const source = value('cover') && this.visible ? canvas.tokens?.controlled[0] : null;
+		const source = value('cover') && this.#shown ? canvas.tokens?.controlled[0] : null;
 		let test = null;
 		if (source) {
 			const describe = (token, diameter) => {
@@ -736,12 +783,168 @@ export class CoverViewLayer extends InteractionLayer {
 		used.add(key);
 	}
 
+	/**
+	 * Every token that is shown, as it stands: `{ x, y, radius, bottom, top, picked }`, a circle
+	 * as wide as the token round its middle, from its feet to its head (in scene pixels), and
+	 * whether it is selected. A token that is being dragged is where it is dragged to.
+	 * @returns {object[]}
+	 */
+	#bodies() {
+		const bodies = [];
+		for (const token of canvas.tokens?.placeables ?? []) {
+			if (token.visible === false || token.isPreview) continue;
+			const shown = token._preview ?? token;
+			const centre = shown.center;
+			if (!centre) continue;
+			const heights = tokenHeights(shown);
+			bodies.push({ x: centre.x, y: centre.y, radius: Math.min(token.w, token.h) / 2, bottom: heights.bottom, top: heights.top,
+				picked: Boolean(token.controlled ?? canvas.tokens.controlled?.includes(token)) });
+		}
+		return bodies;
+	}
+
+	/**
+	 * What the view in perspective is to draw right now (see view3d.mjs): the whole scene, every
+	 * level of it.
+	 *  - `levels`: each level with the height of its base, whether it has a floor all over
+	 *    there (`plane`), its further floors (the surfaces that are floors of it), and what
+	 *    they show. The viewed level shows Foundry's own picture. Another level shows its own
+	 *    picture or color (`image`, `color`), lit by the light that was traced for its floors
+	 *    (`light`, see lighting.mjs) between the colors Foundry gives an unlit and a lit place.
+	 *  - `tokens`: every token of the scene. One that Foundry has on the canvas shows on its top
+	 *    what Foundry draws of it; another shows its own picture (`image`).
+	 *  - `walls`, the surfaces that are no floor of any level, the traced lights and the cover
+	 *    test belong to the GM's view, and are left out while that is not shown. A wall that
+	 *    names levels ends where those levels end.
+	 */
+	#seen() {
+		const shown = this.#shown;
+		const scene = canvas.scene;
+		if (this.#whole?.at !== this.#obstacles.count || this.#whole.view !== canvas.level) {
+			const levels = sceneLevels();
+			const walls = [];
+			for (const document of scene?.walls ?? []) {
+				const [ax, ay, bx, by] = document.c;
+				if (ax === bx && ay === by) continue;
+				const surface = wallSurface(document);
+				walls.push({ a: { x: ax, y: ay }, b: { x: bx, y: by }, ...wallHeights(document, true),
+					mirror: (surface.metallicLeft >= 0.99 && surface.smoothnessLeft >= 0.99) || (surface.metallicRight >= 0.99 && surface.smoothnessRight >= 0.99) });
+			}
+			this.#whole = { at: this.#obstacles.count, view: canvas.level, levels, surfaces: surfacesByLevel(levels), walls };
+		}
+		const whole = this.#whole;
+		const lights = this.#lighting.info;
+		const pictures = lights?.traced ? this.#lighting.levelPictures : new Map();
+		const size = canvas.dimensions?.size ?? 100;
+		const levels = whole.levels.map((entry) => ({ id: entry.id, viewed: entry.viewed, base: entry.base, plane: entry.plane, image: entry.image, color: entry.color,
+			light: entry.viewed ? null : pictures.get(entry.id) ?? null,
+			// a floor at the height of a floor that is all over is that floor
+			floors: whole.surfaces.filter((surface) => surface.of.includes(entry.id) && (!entry.plane || surface.z > entry.base + 0.5)) }));
+
+		const tokens = this.#bodies();
+		for (const token of scene?.tokens ?? []) {
+			if (token.viewed !== false || (token.hidden && !game.user.isGM)) continue;
+			const heights = tokenHeights(token);
+			const wide = (token.width ?? 1) * size;
+			const high = (token.height ?? 1) * size;
+			tokens.push({ x: token.x + wide / 2, y: token.y + high / 2, radius: Math.min(wide, high) / 2, bottom: heights.bottom, top: heights.top, picked: false, image: token.texture?.src ?? null });
+		}
+
+		// the cover test: from the place of the source that sees most of each target
+		const cover = [];
+		const test = shown ? this.#coverTest : null;
+		for (const target of test?.targets ?? []) {
+			const result = target.result;
+			if (!result?.points?.length) continue;
+			const best = result.points.reduce((p, q) => (q.obstructed < p.obstructed ? q : p));
+			cover.push({ eye: [best.at.x, best.at.y, best.at.z], line: [result.lineA, result.lineB].map((p) => [p.x, p.y, p.z]), centre: target.p, radius: target.da / 2,
+				bottom: target.bottom, top: target.head, heights: result.heights ?? 1, runs: best.runs.map((run) => ({ from: run.from, to: run.to, mask: run.mask ?? (run.blocked ? 1 : 0) })) });
+		}
+
+		const colors = canvas.colors ?? {};
+		return { floor: whole.levels[0].base, viewedBase: whole.levels.find((entry) => entry.viewed)?.base ?? whole.levels[0].base,
+			area: canvas.dimensions?.sceneRect ?? canvas.dimensions?.rect, lightArea: this.#root,
+			dark: colors.background?.rgb ?? [0.19, 0.19, 0.19], bright: colors.bright?.rgb ?? [1, 1, 1],
+			tall: (value('wallHeight') || 2) * size, levels, tokens, cover,
+			surfaces: shown ? whole.surfaces.filter((surface) => !surface.of.length) : [],
+			walls: shown ? (whole.walls.length ? whole.walls : [...this.#walls.values()]) : [],
+			lights: shown && lights?.traced ? lights.lights ?? [] : [] };
+	}
+
+	/** To PIXI: where on Foundry's flat picture the mouse is, while the scene is shown in perspective (see wrappers.mjs). */
+	mapPointer(point, clientX, clientY) {
+		return this.#view3d.mapPointer(point, clientX, clientY);
+	}
+
+	/** To Foundry: the place on the scene a place of the mouse is at; null while the scene is not shown in perspective. */
+	sceneFromClient(origin) {
+		return this.#view3d.active ? this.#view3d.sceneAt(origin.x, origin.y) : null;
+	}
+
+	/** To Foundry: where the mouse would be for a place on the scene; null while the scene is not shown in perspective. */
+	clientFromScene(origin) {
+		return this.#view3d.active ? this.#view3d.clientAt(origin) : null;
+	}
+
+	/**
+	 * The tokens as they stand in the isometric view: each a cylinder from its feet to its head,
+	 * the farther ones drawn first. A cylinder is one outline (the near half of its bottom, its
+	 * two sides, the far half of its top) and its top over that.
+	 */
+	#drawBodies() {
+		const g = this.#parts.bodies;
+		g.clear();
+		if (!this.#tilted) return;
+		const u = this.#unit;
+		const lie = this.#lie;
+		// the map lies at the height of the ground: the lowest floor that is seen
+		const floor = viewedFloors().ground;
+		const beside = { x: -lie.across.y, y: lie.across.x };
+		// the way round a circle that comes nearer the bottom of the screen
+		const near = lie.b * beside.x + lie.d * beside.y > 0 ? 1 : -1;
+		const arc = (body, z, from, to, way) => {
+			const points = [];
+			for (let k = 0; k <= 16; k++) {
+				const turn = from + ((to - from) * k) / 16;
+				const x = body.x + body.radius * (Math.cos(turn) * lie.across.x + Math.sin(turn) * way * beside.x);
+				const y = body.y + body.radius * (Math.cos(turn) * lie.across.y + Math.sin(turn) * way * beside.y);
+				points.push(x + lie.up.x * (z - floor), y + lie.up.y * (z - floor));
+			}
+			return points;
+		};
+		const depth = (body) => lie.b * body.x + lie.d * body.y;
+		for (const body of this.#bodies().sort((p, q) => depth(p) - depth(q))) {
+			const color = body.picked ? PICKED : INK;
+			const top = { x: body.x + lie.up.x * (body.top - floor), y: body.y + lie.up.y * (body.top - floor) };
+			if (body.top > body.bottom) {
+				g.lineStyle({ width: 1.5 * u, color, alpha: 0.9 }).beginFill(color, 0.2)
+					.drawPolygon([...arc(body, body.bottom, Math.PI, 0, near), ...arc(body, body.top, 0, Math.PI, -near)]).endFill();
+			}
+			g.lineStyle({ width: 1.5 * u, color, alpha: 0.9 }).beginFill(color, 0.16).drawCircle(top.x, top.y, body.radius).endFill();
+		}
+	}
+
+	/** Takes everything of the view off the canvas but the tokens as they stand. */
+	#clearView() {
+		for (const name of ['cells', 'walls', 'cover', 'rays']) this.#parts[name].clear();
+		for (const label of this.#labels.values()) label.destroy();
+		this.#labels = new Map();
+		for (const mark of this.#marks.values()) mark.destroy();
+		this.#marks = new Map();
+		this.#held = null;
+	}
+
 	#redraw() {
 		const parts = this.#parts;
-		// nobody sees a hidden view, and for any user but the GM it is always hidden
-		if (!parts || !this.#root || !this.visible) return;
-		const u = this.#unit;
+		// nobody sees a hidden layer, and for any user but the GM it is always hidden
+		if (!parts || !this.visible) return;
 		this.#drawnZoom = canvas.stage.scale.x;
+		this.#drawBodies();
+		if (!this.#shown || !this.#root) {
+			this.#clearView();
+			return;
+		}
+		const u = this.#unit;
 		const root = this.#root;
 		const test = this.#coverTest;
 		const lights = this.#lighting.info;
@@ -789,9 +992,9 @@ export class CoverViewLayer extends InteractionLayer {
 
 		// --- the isometric view: what has a height stands. Walls are drawn from the back of the
 		// screen to the front, so that the nearer ones lie over the farther.
-		const isometric = value('isometric');
+		const isometric = this.#tilted;
 		const lie = this.#lie;
-		const floor = floorHeight();
+		const floor = viewedFloors().ground;
 		const lifted = (p, z) => ({ x: p.x + lie.up.x * (z - floor), y: p.y + lie.up.y * (z - floor) });
 		if (isometric) {
 			parts.walls.lineStyle(0);
@@ -814,25 +1017,11 @@ export class CoverViewLayer extends InteractionLayer {
 				parts.walls.lineStyle({ width: u, color, alpha: open ? 0.45 : 0.9, ...round }).beginFill(color, open ? 0.1 : 0.22).drawPolygon(corners).endFill();
 			}
 		}
-		// a token as it stands: its circle again at a height, and its two sides as the screen shows them
-		const standing = (g, p, radius, bottom, top) => {
-			const head = lifted(p, top);
-			g.drawCircle(head.x, head.y, radius);
-			for (const side of [-1, 1]) {
-				const edge = { x: p.x + lie.across.x * radius * side, y: p.y + lie.across.y * radius * side };
-				line(g, lifted(edge, bottom), lifted(edge, top));
-			}
-		};
-
 		// --- cover test: per target the diameter of the source used for it, and per point of
 		// that diameter one triangle per run of rays, to where the run meets the target
 		parts.cover.clear();
 		if (test) {
 			parts.cover.lineStyle({ width: 1.5 * u, color: INK }).drawCircle(test.s.x, test.s.y, test.ds / 2);
-			if (isometric) {
-				standing(parts.cover, test.s, test.ds / 2, test.bottom, test.eye);
-				for (const target of test.targets) standing(parts.cover, target.p, target.da / 2, target.bottom, target.head);
-			}
 			const dots = [];
 			for (const target of test.targets) {
 				parts.cover.lineStyle({ width: 1.5 * u, color: INK }).drawCircle(target.p.x, target.p.y, target.da / 2);
@@ -865,6 +1054,9 @@ export class CoverViewLayer extends InteractionLayer {
 				this.#label(labels, 'target ' + target.id, game.i18n.format('COVERQV.Label.Target', { name: target.name, share }), target.p.x, target.p.y - target.top);
 			}
 		}
+
+		// in perspective the cover test is drawn as it runs through the room, not flat on the map
+		if (value('perspective')) parts.cover.clear();
 
 		// --- rays: dashed, solid while selected; the line of a ray can be dragged as well
 		parts.rays.clear();
@@ -1077,7 +1269,14 @@ export class CoverViewLayer extends InteractionLayer {
 
 	/** Follows a change of one of the switches or numbers of settings.mjs. */
 	optionChanged(key) {
-		if (key === 'isometric') this.#applyPerspective();
+		if (key === 'isometric' || key === 'perspective') {
+			this.#applyPerspective();
+			this.#showOrHide();
+			// the light on the floors of the other levels is traced for the view in perspective only
+			this.refreshTree();
+			this.#redraw();
+			return;
+		}
 		// either may be the first reason to load the library
 		if (key === 'show' || (key === 'lights' && !this.#cover)) {
 			this.#showOrHide();

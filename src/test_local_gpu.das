@@ -919,17 +919,18 @@ def test_cover(var treeS:string; var source:float3; targets:float4?; count:int; 
 		var least = 1.0
 		for point in cover.points
 			for k in range(point.rays / cover.heights)
-				let stopped = bitsOf(masks[next], cover.heights)
+				let mask = masks[next] & ((1 << cover.heights) - 1)
+				let stopped = bitsOf(mask, cover.heights)
 				let end = float3(rays[next * 2].x + rays[next * 2 + 1].x, rays[next * 2].y + rays[next * 2 + 1].y, cover.target.z)
 				next ++
 				point.blocked += stopped
 				let share = float(stopped) / float(cover.heights)
-				// neighbouring directions of which as much is blocked are kept as one run
+				// neighbouring directions in which the same heights are blocked are kept as one run
 				let last = length(point.runs) - 1
-				if last >= 0 && point.runs[last].share == share
+				if last >= 0 && point.runs[last].mask == mask
 					point.runs[last].to = end
 				else
-					push(point.runs, CoverRun(blocked = stopped == cover.heights, share = share, from = end, to = end))
+					push(point.runs, CoverRun(blocked = stopped == cover.heights, share = share, mask = mask, from = end, to = end))
 			if point.rays > 0
 				point.obstructed = float(point.blocked) / float(point.rays)
 			least = min(least, point.obstructed)
@@ -1621,12 +1622,15 @@ struct Shadow
 	rayB: Ray
 	area: array<float3>
 
-// A stretch of neighbouring directions of test_cover of which equally much is blocked: `share`
-// of the rays of each, from none (0) to all of them (1, for which `blocked` is set). from and
-// to are where its first and its last direction meet the target circle.
+// A stretch of neighbouring directions of test_cover in which the same heights of the target
+// are blocked: `mask` has one bit per height the target is looked at, the lowest height first,
+// set where the ray to that height is stopped. `share` is how many of them that is, from none
+// (0) to all (1, for which `blocked` is set). from and to are where its first and its last
+// direction meet the target circle.
 struct CoverRun
 	blocked: bool
 	share: float
+	mask: int
 	from: float3
 	to: float3
 
