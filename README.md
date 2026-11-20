@@ -54,6 +54,12 @@ What that changes:
 
 On a scene where nothing names a height, everything is as on a flat map.
 
+The switch "Isometric view" in the scene controls turns the whole canvas so that the scene is
+seen from the side, for the user who sets it. The GM's view then draws what has a height
+standing: walls from bottom to top, floors and roofs where they lie, the tokens of the cover
+test from feet to head, and each traced light at its height. Token and tile art stays flat on
+the map.
+
 ## Layout
 
 | Path | What it is |

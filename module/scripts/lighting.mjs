@@ -96,7 +96,11 @@ export class PathTracedLighting {
 	/** What the picture was traced from, as text: it is traced again when this changes. */
 	#inputs = '';
 
-	/** `{ count, walls, ms, error, traced, draft }` of the last picture, or null while switched off. */
+	/**
+	 * `{ count, walls, ms, error, traced, draft, lights }` of the last picture, or null while
+	 * switched off; `lights` says of each traced source where it is (`x`, `y`), how high (`z`)
+	 * and of what color.
+	 */
 	#info = null;
 
 	/** True while a look at the light sources is waiting for the next frame. */
@@ -323,7 +327,7 @@ export class PathTracedLighting {
 	}
 
 	#trace(sources, picture, draft) {
-		const info = { count: sources.length, walls: 0, ms: 0, error: '', traced: false, draft };
+		const info = { count: sources.length, walls: 0, ms: 0, error: '', traced: false, draft, lights: sources.map(({ x, y, z, color }) => ({ x, y, z, color })) };
 		const started = performance.now();
 		try {
 			info.walls = this.#cover.traceLights(this.#treeJson, sources, picture).walls;

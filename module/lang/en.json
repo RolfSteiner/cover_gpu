@@ -10,6 +10,7 @@
 			"cover": "Cover test: how much of every other token the walls and floors that stop movement hide from the selected token, by the heights of the walls and of the tokens",
 			"lights": "Path trace the light of the scene's light sources, for every user, in place of Foundry's own light. Places the reflected light reaches count as lit for what tokens see",
 			"cells": "Show the quadtree cells and the bounding boxes of the walls",
+			"isometric": "Isometric view: turn the whole scene so that it is seen from the side, with walls, floors, the tokens of the cover test and the path traced lights standing at their heights",
 			"settings": "Settings",
 			"clear": "Remove all rays"
 		},

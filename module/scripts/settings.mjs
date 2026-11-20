@@ -11,7 +11,7 @@ export const MODULE_ID = 'cover-quadtree-view';
 export const LAYER = 'coverView';
 
 /** The switches, with what they start as. */
-export const TOGGLES = { show: true, cover: true, lights: false, cells: true };
+export const TOGGLES = { show: true, cover: true, lights: false, cells: true, isometric: false };
 
 /** The switches that are kept with the world. */
 const WORLD = ['lights'];

@@ -11,6 +11,9 @@
 //    token sees it in a mirror (see mirrors.mjs for why Foundry does not always find that out
 //    by itself), and when a token sees another over or under the walls between them (see
 //    sight.mjs: Foundry's views are flat shapes, which a wall cuts off whatever stands behind it).
+//  - HeadsUpDisplayContainer#align, which lays the HTML of the HUDs (the buttons round a token)
+//    over the canvas by the canvas's place and zoom: in the isometric view of this module the
+//    canvas is also turned, and the HUD is turned with it.
 //
 // PF2E Visioner (github.com/roileaf/pf2e-visioner), where it is active. Visioner works out, for
 // every pair of tokens, how well the one perceives the other and what cover it has from it,
@@ -85,6 +88,22 @@ export function wrapFoundry() {
 		if (typeof options !== 'object' || options?.condition) return false;
 		return layer()?.isLit(point) ?? false;
 	});
+	if (foundry.applications?.hud?.HeadsUpDisplayContainer) {
+		wrap('foundry.applications.hud.HeadsUpDisplayContainer.prototype.align', function (wrapped, ...args) {
+			wrapped(...args);
+			const style = this.element?.style;
+			const stage = canvas?.stage;
+			if (!style || !stage) return;
+			if (!value('isometric')) {
+				style.transformOrigin = '';
+				return;
+			}
+			// the whole of how the stage lies on the screen, as it is right now
+			stage.transform.updateLocalTransform();
+			const { a, b, c, d, tx, ty } = stage.localTransform;
+			Object.assign(style, { left: '0px', top: '0px', transformOrigin: '0 0', transform: `matrix(${a}, ${b}, ${c}, ${d}, ${tx}, ${ty})` });
+		});
+	}
 	wrap('CONFIG.Canvas.groups.visibility.groupClass.prototype.testVisibility', function (wrapped, points, options = {}) {
 		if (wrapped(points, options)) return true;
 		const view = layer();
