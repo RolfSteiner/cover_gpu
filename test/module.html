@@ -1,0 +1,537 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>module checks</title>
+<body style="margin:0;background:#222;color:#ddd;font:13px monospace">
+<div id="stage"></div>
+<pre id="out" style="margin:0;padding:8px">loading</pre>
+<script>
+// a hidden pane runs no animation frames; timers stand in for them here
+window.requestAnimationFrame = (fn) => setTimeout(() => fn(performance.now()), 16);
+window.cancelAnimationFrame = (id) => clearTimeout(id);
+</script>
+<script src="/foundry/node_modules/pixi.js/dist/pixi.min.js"></script>
+<script type="module">
+// The module (module/scripts) run outside Foundry: real PIXI (the build Foundry ships) and
+// Foundry's real quadtree class, both taken from a Foundry installation served under /foundry/
+// (see server.mjs), and stand-ins for the rest of Foundry that the module touches. The page
+// sets a scene up and leaves handles in window.h; checks are run against those from the
+// browser's console. window.done turns true when the scene is ready, window.report says how
+// that went.
+const out = document.getElementById('out');
+window.done = false;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+PIXI.Rectangle.prototype.normalize = function () {
+	if (this.width < 0) { this.x += this.width; this.width = -this.width; }
+	if (this.height < 0) { this.y += this.height; this.height = -this.height; }
+	return this;
+};
+Array.prototype.findSplice = function (find) { const i = this.findIndex(find); return i < 0 ? null : this.splice(i, 1)[0]; };
+
+const hooks = {};
+window.Hooks = {
+	on: (name, fn) => { (hooks[name] ??= []).push(fn); },
+	once: (name, fn) => { (hooks[name] ??= []).push(fn); },
+	callAll: (name, ...args) => { for (const fn of hooks[name] || []) fn(...args); },
+};
+const strings = (await (await fetch('/module/lang/en.json')).json());
+const lookup = (key) => key.split('.').reduce((o, k) => (o && typeof o === 'object' ? o[k] : undefined), strings);
+const missing = new Set();
+const localize = (key) => { const v = lookup(key); if (typeof v !== 'string') { missing.add(key); return key; } return v; };
+const registered = new Map();
+const stored = new Map();
+const notes = [];
+const moduleEntry = {};
+window.game = {
+	activeTool: 'move',
+	user: { isGM: true },
+	i18n: { localize, format: (key, data = {}) => localize(key).replace(/\{(\w+)\}/g, (m, k) => (k in data ? data[k] : m)) },
+	// the modules of the world: this one, libWrapper, and PF2E Visioner as far as it is asked about
+	modules: { get: (id) => (id === 'cover-quadtree-view' ? moduleEntry : { active: true }) },
+	settings: {
+		register: (ns, key, config) => registered.set(ns + '.' + key, config),
+		get: (ns, key) => (stored.has(ns + '.' + key) ? stored.get(ns + '.' + key) : registered.get(ns + '.' + key).default),
+		set: (ns, key, v) => { stored.set(ns + '.' + key, v); registered.get(ns + '.' + key).onChange?.(v); return Promise.resolve(v); },
+	},
+};
+window.ui = { notifications: { error: (text) => notes.push(text) } };
+// libWrapper in small: a wrapper goes on the function a path from the global scope leads to,
+// on the object the path ends at, and gets the function that was there as its first argument.
+window.libWrapper = {
+	registered: [],
+	register(pack, target, fn, type = 'MIXED') {
+		const names = target.split('.');
+		const name = names.pop();
+		let object = globalThis;
+		for (const part of names) object = object[part];
+		const before = object[name];
+		if (typeof before !== 'function') throw new Error(`libWrapper: no function at ${target}`);
+		object[name] = function (...args) { return fn.call(this, before.bind(this), ...args); };
+		this.registered.push(`${target} ${type}`);
+	},
+};
+// PF2E Visioner as far as this module reaches into it: the object it keeps for working everything out again
+window.visionerStub = { light: 0, lineOfSight: false, percent: 12.5, cleared: 0, recalculated: 0 };
+window.pf2eVisioner = { services: { autoVisibilitySystem: { clearLightCache() { visionerStub.cleared++; }, recalculateAllVisibility() { visionerStub.recalculated++; } } } };
+class CanvasLayer extends PIXI.Container {
+	static get layerOptions() { return { name: '', zIndex: 0 }; }
+	get options() { return this.constructor.layerOptions; }
+	getZIndex() { return this.options.zIndex; }
+	#drawn = false;
+	async draw(options = {}) { await this.tearDown(); await this._draw(options); this.#drawn = true; return this; }
+	async _draw() { this.zIndex = this.getZIndex(); }
+	async tearDown(options = {}) { if (!this.#drawn) return this; this.#drawn = false; await this._tearDown(options); return this; }
+	async _tearDown() { this.removeChildren().forEach((c) => c.destroy({ children: true })); }
+}
+class InteractionLayer extends CanvasLayer {
+	#active = false;
+	get active() { return this.#active; }
+	activate() { if (this.#active) return this; this.#active = true; this.eventMode = 'static'; this._activate(); return this; }
+	deactivate() { if (!this.#active) return this; this.#active = false; this._deactivate(); return this; }
+	_activate() {}
+	_deactivate() {}
+	static prepareSceneControls() { return null; }
+}
+let dialogAnswer = null;
+window.foundry = {
+	canvas: { layers: { InteractionLayer }, containers: { PreciseText: class extends PIXI.Text {} } },
+	utils: {
+		mergeObject: (a, b) => Object.assign(a, b),
+		debounce: (fn, delay) => { let t; return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), delay); }; },
+	},
+	data: { fields: { BooleanField: class { constructor(o) { this.options = o; } }, NumberField: class { constructor(o) { this.options = o; } } } },
+	applications: { api: { DialogV2: { input: async (config) => { window.lastDialog = config; return dialogAnswer; } } } },
+};
+window.CONFIG = { Canvas: { layers: {}, groups: {} }, canvasTextStyle: new PIXI.TextStyle({ fontFamily: 'sans-serif', fontSize: 36, fill: '#FFFFFF', stroke: '#111111', strokeThickness: 1, dropShadow: true, dropShadowColor: '#000000', dropShadowBlur: 2, dropShadowAngle: 0, dropShadowDistance: 0, align: 'center', padding: 1 }) };
+
+const report = {};
+window.report = report;
+try {
+	const { CanvasQuadtree } = await import('/foundry/client/canvas/geometry/quadtree.mjs');
+	const given = await (await fetch('/test/data/walls.json')).json();
+	const unique = new Map();
+	for (const node of given.nodes) for (const o of node.objects) unique.set([o.t.a.x, o.t.a.y, o.t.b.x, o.t.b.y].join(), [o.t.a.x, o.t.a.y, o.t.b.x, o.t.b.y]);
+	// a wall document with Foundry's fields; its edge is made the way WallDocument#createEdge makes it
+	const DPX = 20;
+	// the scene: what Wall Height keeps with it, and the surfaces its regions define
+	const surfaces = [];
+	const sceneDocument = { id: 'scene-one', dimensions: { distancePixels: DPX }, flags: {}, levels: new Map(),
+		getSurfaces: () => surfaces };
+	// a surface as Scene#getSurfaces lists it, over a rectangle
+	const makeSurface = (elevation, [x0, y0, x1, y1], stops = {}) => {
+		const surface = { elevation, light: true, move: true, sight: true, ...stops,
+			region: { triangulation: { vertices: new Float32Array([x0, y0, x1, y0, x1, y1, x0, y1]), indices: new Uint16Array([0, 1, 2, 0, 2, 3]) } } };
+		surfaces.push(surface);
+		return surface;
+	};
+	const makeWall = (c, props = {}) => ({
+		document: { c, move: 20, light: 20, sight: 20, sound: 20, dir: 0, door: 0, ds: 0, threshold: { light: null, sight: null, sound: null, attenuation: false },
+			parent: sceneDocument, noEdge: false, flags: {}, documentName: 'Wall', ...props,
+			get edge() {
+				if (this.noEdge) return null;
+				const open = this.door > 0 && this.ds === 1;
+				const v = (x) => (open ? 0 : x);
+				return { move: v(this.move), light: v(this.light), sight: v(this.sight), sound: v(this.sound), direction: this.dir,
+					threshold: { light: this.threshold.light * DPX, sight: this.threshold.sight * DPX, sound: this.threshold.sound * DPX, attenuation: this.threshold.attenuation } };
+			} },
+		get bounds() { const [x0, y0, x1, y1] = this.document.c; return new PIXI.Rectangle(x0, y0, x1 - x0, y1 - y0).normalize(); } });
+	window.CONST = { EDGE_SENSE_TYPES: { NONE: 0, LIMITED: 10, NORMAL: 20, PROXIMITY: 30, DISTANCE: 40 }, WALL_DOOR_TYPES: { NONE: 0, DOOR: 1, SECRET: 2 },
+		WALL_DOOR_STATES: { CLOSED: 0, OPEN: 1, LOCKED: 2 }, EDGE_DIRECTIONS: { BOTH: 0, LEFT: 1, RIGHT: 2 } };
+	// light sources as canvas.effects.lightSources holds them: the scene's global light, which has
+	// no reach, and point sources with Foundry's data
+	const lightSources = [{ active: true, data: { x: 0, y: 0, disabled: false }, colorRGB: null }];
+	const makeLight = (data, colorRGB = null) => {
+		const source = { active: true, colorRGB, level: { isView: true }, object: null,
+			get isAnimated() { return this.active && this.data.animation?.type; },
+			shape: { contains: (x, y) => Math.hypot(x - source.data.x, y - source.data.y) < source.data.radius },
+			data: { x: 0, y: 0, elevation: 0, disabled: false, rotation: 0, angle: 360, walls: true, externalRadius: 0, alpha: 0.5, bright: 0, dim: 0, attenuation: 0.5, ...data } };
+		source.data.radius = Math.max(source.data.dim, source.data.bright);
+		// its meshes in the three layers of Foundry's lighting; only the one that lights is drawn here
+		source.layers = { background: { mesh: new PIXI.Container() }, illumination: { mesh: new PIXI.Graphics() }, coloration: { mesh: new PIXI.Container() } };
+		lightSources.push(source);
+		return source;
+	};
+
+	const SCALE = 0.2;
+	const app = new PIXI.Application({ width: 1200, height: 920, backgroundColor: 0x30363d, antialias: true, preserveDrawingBuffer: true });
+	document.getElementById('stage').append(app.view);
+	const stage = new PIXI.Container();
+	stage.scale.set(SCALE);
+	app.stage.addChild(stage);
+	// something map-like under the layer, so that darkness has a scene to darken
+	const map = stage.addChild(new PIXI.Graphics());
+	for (let i = 0; i < 12; i++) for (let j = 0; j < 10; j++) map.beginFill((i + j) % 2 ? 0x6b8f5e : 0x7fa56f).drawRect(i * 500, j * 460, 500, 460).endFill();
+	// as in Foundry: the stage takes the mouse, and whatever reaches it goes to the active layer
+	app.stage.eventMode = 'static';
+	app.stage.hitArea = app.screen;
+	stage.eventMode = 'static';
+	stage.hitArea = new PIXI.Rectangle(-100000, -100000, 200000, 200000);
+	window.stageDowns = 0;
+	stage.on('pointerdown', () => { window.stageDowns++; });
+	const tokenArt = stage.addChild(new PIXI.Graphics());
+	// a token of Foundry's: it stands on its elevation and is `depth` grid squares high
+	const makeToken = (id, name, x, y, size = 100) => ({ id, document: { name, documentName: 'Token', elevation: 0, depth: size / 100, width: size / 100, height: size / 100 },
+		w: size, h: size, x, y, isPreview: false, _preview: null,
+		get center() { return { x: this.x + this.w / 2, y: this.y + this.h / 2 }; } });
+	const tokens = { controlled: [], placeables: [] };
+	const drawTokens = () => {
+		tokenArt.clear();
+		for (const t of tokens.placeables) {
+			const at = (t._preview ?? t).center;
+			tokenArt.lineStyle(tokens.controlled.includes(t) ? 8 : 0, 0xff9829).beginFill(0x4b6cb7).drawCircle(at.x, at.y, t.w / 2).endFill();
+		}
+	};
+	// Foundry's lighting in small. The illumination layer is multiplied onto what is under it;
+	// it holds a baseline, the color an unlit place keeps, and over it the meshes of the light
+	// sources, which Foundry puts back in each time it draws its lighting anew. The two other
+	// layers a light source has a mesh in are kept, not drawn.
+	const illumination = stage.addChild(new PIXI.Container());
+	const baseline = illumination.addChild(new PIXI.Graphics());
+	const lightMeshes = illumination.addChild(new PIXI.Container());
+	lightMeshes.sortableChildren = true;
+	const multiplied = new PIXI.AlphaFilter(1);
+	multiplied.blendMode = PIXI.BLEND_MODES.MULTIPLY;
+	illumination.filters = [multiplied];
+	illumination.filterArea = app.screen;
+	const coloration = new PIXI.Container();
+	const backgroundLighting = new PIXI.Container();
+	const colors = { background: { rgb: [0x30 / 255, 0x30 / 255, 0x30 / 255] }, bright: { rgb: [1, 1, 1] } };
+	const hex = (rgb) => (Math.round(rgb[0] * 255) << 16) | (Math.round(rgb[1] * 255) << 8) | Math.round(rgb[2] * 255);
+	window.foundryRefreshes = 0;
+	const refreshLighting = () => {
+		baseline.clear().beginFill(hex(colors.background.rgb)).drawRect(-2000, -2000, 10000, 8600).endFill();
+		for (const container of [lightMeshes, coloration, backgroundLighting]) container.removeChildren();
+		for (const source of lightSources) {
+			if (!source.active || !source.layers) continue;
+			// Foundry's own light: bright all the way to its reach, and through every wall
+			source.layers.illumination.mesh.clear().beginFill(hex(colors.bright.rgb)).drawCircle(source.data.x, source.data.y, source.data.radius).endFill();
+			lightMeshes.addChild(source.layers.illumination.mesh);
+			coloration.addChild(source.layers.coloration.mesh);
+			backgroundLighting.addChild(source.layers.background.mesh);
+		}
+		window.foundryRefreshes++;
+		Hooks.callAll('lightingRefresh');
+	};
+	// Foundry's own answer to "is this place in light": inside the reach of a light source. The
+	// method sits on the class of canvas.effects, as in Foundry.
+	class Effects {
+		lightSources = lightSources;
+		visionSources = visionSources;
+		illumination = { lights: lightMeshes };
+		coloration = coloration;
+		background = { lighting: backgroundLighting };
+		testInsideLight(point, options = {}) {
+			return lightSources.some((s) => s.active && s.layers && options.condition?.(s) !== false && Math.hypot(s.data.x - point.x, s.data.y - point.y) < s.data.radius);
+		}
+	}
+	// the part of Foundry's vision mask that holds what is visible because of light
+	const visionLight = new PIXI.Container();
+	// ... and the two it draws a vision source's shapes into: what is in sight, and where light can be perceived
+	const visionSight = new PIXI.Graphics();
+	visionLight.mask = new PIXI.Graphics();
+	const MAX_R = 20000;
+	// A view as Foundry's ClockwiseSweepPolygon gives it, found the slow way: rays all round, each
+	// to the first wall that stops sight. Shapes a view is bounded by can leave walls out
+	// (_includeEdge) and narrow the view; as in Foundry, they are in config.boundaryShapes.
+	// the height a token looks from, in the scene's units, as the module Wall Height has it
+	const heightOf = (token) => (token?.document ? (token.losHeight ?? token.document.elevation + token.document.depth * 5) : null);
+	class ViewPolygon extends PIXI.Polygon {
+		static create(origin, config) {
+			const shapes = config.boundaryShapes ?? [];
+			const eye = heightOf(config.source?.object);
+			const stands = (w) => { const said = w.document.flags['wall-height'] ?? {}; return eye === null || (eye >= (said.bottom ?? -Infinity) && eye <= (said.top ?? Infinity)); };
+			const walls = canvas.walls.placeables.filter((w) => w.document.edge.sight !== 0 && stands(w)).map((w) => w.document.c)
+				.filter(([x0, y0, x1, y1]) => shapes.every((s) => !s._includeEdge || s._includeEdge({ x: x0, y: y0 }, { x: x1, y: y1 })));
+			const points = [];
+			for (let i = 0; i < 2880; i++) {
+				const angle = (i / 2880) * 2 * Math.PI;
+				const d = { x: Math.cos(angle), y: Math.sin(angle) };
+				let reach = config.radius ?? MAX_R;
+				for (const [x0, y0, x1, y1] of walls) {
+					const wx = x1 - x0, wy = y1 - y0;
+					const den = d.x * wy - d.y * wx;
+					if (den === 0) continue;
+					const t = ((x0 - origin.x) * wy - (y0 - origin.y) * wx) / den;
+					const u = ((x0 - origin.x) * d.y - (y0 - origin.y) * d.x) / den;
+					if (t > 0 && u >= 0 && u <= 1 && t < reach) reach = t;
+				}
+				points.push(origin.x + d.x * reach, origin.y + d.y * reach);
+			}
+			const made = new ViewPolygon(points);
+			made.origin = origin;
+			made.config = { ...config, boundaryShapes: [...shapes] };
+			return made;
+		}
+		// as Foundry's PointSourcePolygon: what a view carries besides its points
+		initialize(origin, config) {
+			this.origin = { x: Math.round(origin.x), y: Math.round(origin.y) };
+			this.config = { ...config, radius: Math.min(config.radius ?? MAX_R, MAX_R), boundaryShapes: [...(config.boundaryShapes ?? [])] };
+		}
+		getBounds() {
+			let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+			for (let i = 0; i < this.points.length; i += 2) {
+				x0 = Math.min(x0, this.points[i]); x1 = Math.max(x1, this.points[i]);
+				y0 = Math.min(y0, this.points[i + 1]); y1 = Math.max(y1, this.points[i + 1]);
+			}
+			return new PIXI.Rectangle(x0, y0, x1 - x0, y1 - y0);
+		}
+		applyConstraint(shape) {
+			const made = new ViewPolygon([...this.points]);
+			made.origin = this.origin;
+			made.bounds = this.bounds;
+			made.config = { ...this.config, boundaryShapes: [...this.config.boundaryShapes, shape] };
+			return made;
+		}
+		contains(x, y) {
+			return (!this.bounds || this.bounds.contains(x, y)) && super.contains(x, y) && this.config.boundaryShapes.every((s) => s.contains(x, y));
+		}
+	}
+	// A vision source as far as the module uses one: the data of Foundry's PointVisionSource, its
+	// three shapes, and the two functions a class made from it changes.
+	class VisionSource {
+		static sourceType = 'sight';
+		blinded = {};
+		updateId = 0;
+		active = false;
+		isBlinded = false;
+		constructor({ sourceId, object } = {}) {
+			this.sourceId = sourceId;
+			this.object = object;
+			this.data = { x: 0, y: 0, elevation: 0, level: 'level', rotation: 0, radius: 0, lightRadius: null, externalRadius: 0, angle: 360,
+				visionMode: 'basic', preview: false, disabled: false };
+		}
+		get origin() { return { x: this.data.x, y: this.data.y }; }
+		get radius() { return this.data.radius ?? 0; }
+		get lightRadius() { return this.data.lightRadius ?? 0; }
+		initialize(data = {}) {
+			for (const key in data) if (key in this.data) this.data[key] = data[key];
+			this.data.x = Math.round(this.data.x);
+			this.data.y = Math.round(this.data.y);
+			this.data.lightRadius ??= MAX_R;
+			this._createShapes();
+			this.updateId++;
+			return this;
+		}
+		_getPolygonConfiguration() {
+			return { type: 'sight', radius: MAX_R, angle: this.data.angle, rotation: this.data.rotation, source: this };
+		}
+		_updateVisionMode() { this.visionModeUpdates = (this.visionModeUpdates ?? 0) + 1; }
+		_getPolygonBackend() { return ViewPolygon; }
+		_within(radius) {
+			return radius >= this.los.config.radius ? this.los : this.los.applyConstraint(new PIXI.Circle(this.data.x, this.data.y, radius));
+		}
+		_createLightPolygon() { return this._within(this.lightRadius); }
+		_createRestrictedPolygon() { return this._within(this.radius || this.data.externalRadius); }
+		_createShapes() {
+			this._updateVisionMode();
+			this.shape = ViewPolygon.create(this.origin, this._getPolygonConfiguration());
+			this.los = this.shape;
+			this.light = this._createLightPolygon();
+			this.shape = this._createRestrictedPolygon();
+		}
+		// among the vision sources of the canvas, or out of them, as Foundry's sources are
+		add() { this.active = true; if (!visionSources.includes(this)) visionSources.push(this); }
+		remove() { const at = visionSources.indexOf(this); if (at >= 0) visionSources.splice(at, 1); this.active = false; }
+		destroy() { this.remove(); this.destroyed = true; }
+	}
+	const visionSources = [];
+	// Foundry's own answer to "can this place be seen": by one of the vision sources of the canvas
+	const inRange = (source, mode, target, test) => mode.range === Infinity || Math.hypot(test.point.x - source.data.x, test.point.y - source.data.y) <= mode.range;
+	const sees = {
+		basicSight: { _canDetect: () => true, _testRange: inRange, _testAngle: () => true,
+			testVisibility: (source, mode, { tests }) => tests.some((t) => source.shape.contains(t.point.x, t.point.y)) },
+		lightPerception: { _canDetect: () => true, _testRange: inRange, _testAngle: () => true,
+			testVisibility: (source, mode, { tests }) => tests.some((t) => source.light.contains(t.point.x, t.point.y) && canvas.effects.testInsideLight(t.point)) },
+	};
+	CONFIG.Canvas.detectionModes = sees;
+	class Visibility {
+		vision = { light: visionLight, sight: visionSight };
+		_createVisibilityTestConfig(points, { object = null } = {}) {
+			return { object, tests: points.map((point) => ({ point, los: new Map() })) };
+		}
+		testVisibility(points, options = {}) {
+			const list = Array.isArray(points) ? points : [points];
+			const config = this._createVisibilityTestConfig(list, options);
+			// as Foundry: a source outside the scene is not asked about a place inside it
+			const scene = canvas.dimensions.rect;
+			const inside = list.some((p) => scene.contains(p.x, p.y));
+			return visionSources.some((source) => source.active && inside === scene.contains(source.data.x, source.data.y)
+				&& Object.entries(source.object.document.detectionModes).some(([id, mode]) => sees[id].testVisibility(source, mode, config)));
+		}
+	}
+	// Foundry draws its vision mask anew: the shapes of its own vision sources, then the hook
+	const refreshVision = () => {
+		visionSight.clear().beginFill(0xff0000);
+		visionLight.mask.clear().beginFill(0xff0000);
+		for (const source of visionSources) {
+			if (!source.active) continue;
+			if (source.radius > 0) visionSight.drawShape(source.shape);
+			if (source.lightRadius > 0) visionLight.mask.drawShape(source.light);
+		}
+		Hooks.callAll('visibilityRefresh', canvas.visibility);
+		visionSight.endFill();
+		visionLight.mask.endFill();
+	};
+	window.canvas = { ready: true, app, stage, scene: sceneDocument, level: { elevation: { base: 0, bottom: 0, top: Infinity } },
+		dimensions: { rect: new PIXI.Rectangle(0, 0, 6000, 4600), size: 100, distance: 5, distancePixels: DPX, maxR: MAX_R / 2 }, walls: {}, tokens,
+		effects: new Effects(), visibility: new Visibility(), masks: { vision: { renderDirty: false } },
+		colors, environment: { weights: { dark: 0, halfdark: 0.5, dim: 0.25, bright: 1 } },
+		// as Foundry's: what is asked for is done once, on the next frame, lighting before vision
+		perception: { asked: 0, visionAsked: 0, pending: {}, update(flags) { Object.assign(this.pending, flags); },
+			apply() {
+				const flags = this.pending;
+				this.pending = {};
+				if (flags.refreshLighting) { this.asked++; refreshLighting(); }
+				if (flags.refreshVision) { this.visionAsked++; refreshVision(); }
+			} } };
+	app.ticker.add(() => canvas.perception.apply(), null, PIXI.UPDATE_PRIORITY.NORMAL + 2);
+	game.canvas = canvas;
+	const quadtree = new CanvasQuadtree();
+	canvas.walls.quadtree = quadtree;
+	const insert = (wall) => { quadtree.update({ r: wall.bounds, t: wall }); return wall; };
+	const wallList = [...unique.values()].map((c) => insert(makeWall(c)));
+	canvas.walls.placeables = wallList;
+	wallList.forEach((wall, number) => { wall.document.id = 'wall' + number; });
+
+	// the classes Foundry makes canvas.effects and canvas.visibility of, where a wrapper goes
+	CONFIG.Canvas.groups = { effects: { groupClass: Effects }, visibility: { groupClass: Visibility } };
+	await import('/module/scripts/main.mjs');
+	Hooks.callAll('init');
+	Hooks.callAll('setup');
+	const { layerClass, group } = CONFIG.Canvas.layers.coverView;
+	const layer = new layerClass();
+	canvas.coverView = layer;
+	stage.addChild(layer);
+	const controls = layerClass.prepareSceneControls();
+	report.control = { name: controls.name, layerName: layerClass.layerOptions.name, group, activeTool: controls.activeTool,
+		tools: Object.values(controls.tools).map((t) => `${t.order}:${t.name}${t.toggle ? '(toggle ' + t.active + ')' : ''}${t.button ? '(button)' : ''}`) };
+	for (const t of Object.values(controls.tools)) localize(t.title);
+	localize(controls.title);
+	await layer.draw();
+	for (let i = 0; i < 100 && !canvas.coverView.children[5]; i++) await sleep(50);
+	await sleep(1500);
+
+	const event = (origin, destination) => ({ interactionData: { origin, destination: destination ?? origin } });
+	// a real mouse event on the canvas element, at a place of the scene
+	const mouse = (type, x, y, button = 0) => {
+		const box = app.view.getBoundingClientRect();
+		const init = { bubbles: true, cancelable: true, pointerId: 1, pointerType: 'mouse', isPrimary: true, button, buttons: type === 'pointerup' ? 0 : (button === 2 ? 2 : 1),
+			clientX: box.left + x * SCALE * (box.width / app.screen.width), clientY: box.top + y * SCALE * (box.height / app.screen.height) };
+		app.view.dispatchEvent(new PointerEvent(type, init));
+	};
+	const frame = () => sleep(60);
+	// the address the module loaded the library by, so that it is the same instance
+	const libraryAddress = () => performance.getEntriesByType('resource').map((entry) => entry.name).filter((name) => name.includes('/module/lib/test_local_gpu_api.js')).pop() ?? '/module/lib/test_local_gpu_api.js';
+	window.h = {
+		layer, controls, quadtree, insert, makeWall, sleep, notes, missing, stored, unique, tokens, makeToken, drawTokens, mouse, frame,
+		surfaces, makeSurface, sceneDocument,
+		// what Wall Height's fields in the sheet of a wall set (in the scene's units), and the hook
+		setHeights: async (wall, bottom, top) => {
+			wall.document.flags['wall-height'] = { ...(bottom === null ? {} : { bottom }), ...(top === null ? {} : { top }) };
+			Hooks.callAll('updateWall');
+			await sleep(350);
+		},
+		// what Foundry's hooks would tell the layer about regions
+		regionsChanged: async () => { Hooks.callAll('updateRegion'); await sleep(350); },
+		marks: () => layer.children[4].children.map((m) => m.thing.kind + (m.thing.end ?? '') + (m.thing.ray ? m.thing.ray.number : '')),
+		// what Foundry's hooks would tell the layer about the tokens
+		select: async (token) => { tokens.controlled = token ? [token] : []; drawTokens(); Hooks.callAll('controlToken'); await frame(); },
+		moveToken: async (token, x, y) => { token.x = x; token.y = y; drawTokens(); Hooks.callAll('refreshToken'); await frame(); },
+		// a drag with the real mouse: down on one place, moves, up on another
+		mouseDrag: async (from, to, steps = 8) => {
+			mouse('pointerdown', from.x, from.y);
+			const times = [];
+			for (let i = 1; i <= steps; i++) {
+				const t0 = performance.now();
+				mouse('pointermove', from.x + (to.x - from.x) * i / steps, from.y + (to.y - from.y) * i / steps);
+				times.push(performance.now() - t0);
+			}
+			mouse('pointerup', to.x, to.y);
+			return (times.reduce((a, b) => a + b, 0) / times.length).toFixed(1) + ' ms per move';
+		},
+		setAnswer: (v) => { dialogAnswer = v; },
+		wallList, lightSources, makeLight, strings,
+		// what Foundry's hooks would tell the layer about walls and lighting
+		wallsChanged: async () => { Hooks.callAll('updateWall'); await sleep(350); },
+		lightingChanged: async () => { refreshLighting(); await frame(); },
+		refreshLighting, colors, visionLight, Effects, visionSight, visionSources, VisionSource, refreshVision, Visibility,
+		// a token that sees: Foundry's vision source for it, set up and counted among the canvas's
+		seeing: (token, radius) => {
+			token.document.detectionModes = { basicSight: { enabled: true, range: radius }, lightPerception: { enabled: true, range: Infinity } };
+			const source = token.vision ?? new VisionSource({ sourceId: 'Token.' + token.id, object: token });
+			token.vision = source;
+			const centre = token.center;
+			source.initialize({ x: centre.x, y: centre.y, radius, visionMode: token.visionMode ?? 'basic' });
+			source.add();
+			// as Foundry after a token's view has changed: lighting and vision are drawn anew on the next frame
+			canvas.perception.update({ refreshVision: true, refreshLighting: true });
+			return source;
+		},
+		// the vision sources Foundry draws the effects of a vision mode for, as it would in refreshLighting
+		visionEffects: () => visionSources.filter((s) => s.active && s.radius > 0).map((s) => `${s.mirrored ? 'mirror' : 'token'} ${s.data.visionMode} ${s.radius}`),
+		// what is in Foundry's three layers of light right now
+		lighting: () => ({ illumination: lightMeshes.children.map((c) => (c instanceof PIXI.Sprite ? 'picture' : 'mesh')).join(), coloration: coloration.children.length, background: backgroundLighting.children.length }),
+		picture: () => lightMeshes.children.find((c) => c instanceof PIXI.Sprite) ?? null,
+		// the sheet of a wall as Foundry draws it, as far as the module looks at it, and the hook
+		wallSheet: (wall) => {
+			const element = document.createElement('form');
+			element.innerHTML = '<section class="window-content"><div class="standard-form scrollable"><p class="hint">instructions</p><fieldset><legend>Restrictions</legend></fieldset><fieldset><legend>Door</legend></fieldset></div><footer class="form-footer"></footer></section>';
+			Hooks.callAll('renderWallConfig', { id: 'WallConfig-test', document: wall.document }, element);
+			return element;
+		},
+		// the wall nearest to a place
+		wallNear: (x, y) => wallList.reduce((best, w) => {
+			const [x0, y0, x1, y1] = w.document.c;
+			const d = Math.hypot((x0 + x1) / 2 - x, (y0 + y1) / 2 - y);
+			return !best || d < best.d ? { w, d } : best;
+		}, null).w,
+		// the color of the harness canvas at a place of the scene, after it has been drawn
+		pixel: (x, y) => {
+			app.render();
+			const copy = document.createElement('canvas');
+			copy.width = app.view.width;
+			copy.height = app.view.height;
+			const context = copy.getContext('2d');
+			context.drawImage(app.view, 0, 0);
+			const k = app.view.width / app.screen.width;
+			return [...context.getImageData(Math.round(x * SCALE * k), Math.round(y * SCALE * k), 1, 1).data].slice(0, 3);
+		},
+		// the script's own picture at a place of the scene
+		lightAt: async (x, y) => {
+			const { cover } = await import(libraryAddress());
+			const copy = document.createElement('canvas');
+			copy.width = cover.canvas.width;
+			copy.height = cover.canvas.height;
+			const context = copy.getContext('2d');
+			context.drawImage(cover.canvas, 0, 0);
+			return [...context.getImageData(Math.round(x / 6000 * copy.width), Math.round(y / 4600 * copy.height), 1, 1).data].slice(0, 3);
+		},
+		labels: () => layer.children[5].children.map((t) => t.text),
+		tool: (name) => { game.activeTool = name; },
+		toggle: (name, on) => controls.tools[name].onChange(null, on),
+		click: (x, y) => layer._onClickLeft(event({ x, y })),
+		rightClick: (x, y) => layer._onClickRight(event({ x, y })),
+		// Foundry sends the click on the way down, then the drag
+		drag: (from, to, steps = 12) => {
+			layer._onClickLeft(event(from));
+			layer._onDragLeftStart(event(from));
+			const times = [];
+			for (let i = 1; i <= steps; i++) {
+				const t0 = performance.now();
+				layer._onDragLeftMove(event(from, { x: from.x + (to.x - from.x) * i / steps, y: from.y + (to.y - from.y) * i / steps }));
+				times.push(performance.now() - t0);
+			}
+			layer._onDragLeftDrop(event(from, to));
+			return (times.reduce((a, b) => a + b, 0) / times.length).toFixed(1) + ' ms per move';
+		},
+		geometry: () => Object.fromEntries(['cells', 'walls', 'cover', 'rays'].map((name, i) => {
+			const child = layer.children[i];
+			return [name, child.geometry ? child.geometry.graphicsData.length : (child.visible ? `${Math.round(child.width)}x${Math.round(child.height)} at ${child.x},${child.y}, texture ${child.texture.baseTexture.realWidth}x${child.texture.baseTexture.realHeight}` : 'hidden')];
+		})),
+	};
+	report.ready = { labels: h.labels(), geometry: h.geometry(), notes };
+} catch (error) {
+	report.failed = String(error && error.stack ? error.stack : error);
+}
+out.textContent = JSON.stringify(report, null, 1);
+window.done = true;
+</script>

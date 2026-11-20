@@ -1,9 +1,20 @@
-// JavaScript wrapper over test_local_gpu_lib.wasm (static/test_local_gpu.das built with
-// `daslang -lib`): the same functions as test_local_api.js, with the ray tests run on the
-// graphics card through WebGL 2.
+// JavaScript wrapper over test_local_gpu_lib.wasm (src/test_local_gpu.das built with
+// `daslang -lib`): tests of rays against the walls of a map, a cover test and a path tracer
+// for the map's light, with the ray tests run on the graphics card through WebGL 2.
 //
 //   import { cover } from './test_local_gpu_api.js';
 //   const { boxHits, wallHits } = cover.test(treeJson, [0, 0, 0], [6000, 4600, 0]);
+//
+// The map has height: a point is `[x, y, z]`, x and y a place on the map and z how high up, all
+// in map units. `treeJson` is the text of an object `{ root, nodes, surfaces }`: the walls in a
+// quadtree, and the flat surfaces (floors, ceilings, roofs), which may be left out.
+//  - An object of the tree is one wall. In `w` it may say how it acts (see `testCover` and
+//    `traceLights`), and with `w.bottom` and `w.top` between which heights it stands; a wall
+//    that leaves one of them out goes as deep, or as high, as the map does.
+//  - A surface is `{ z, light, move, t }`: it lies level at the height `z`, `light` and `move`
+//    are 1 when it stops light and movement, and `t` holds the triangles that make up its area,
+//    six numbers each (the x and y of three corners). It is the floor of what is above it: what
+//    sets off on it and goes up does not pass through it.
 //
 // It works in a browser only: Node has no WebGL. The wasm library loads while this module is
 // imported (top-level await), so `cover` is ready to call as soon as the import has finished.
@@ -93,7 +104,8 @@ function callWithPoint(exported, treeJson, point) {
 
 export const cover = {
 	/**
-	 * Tests the segment from `a` to `b` against the objects of the tree in `treeJson`.
+	 * Tests the segment from `a` to `b` against the objects of the tree in `treeJson`. The box of
+	 * a wall stands from the wall's bottom to its top, as the wall does.
 	 *
 	 * @param {string} treeJson
 	 * @param {[number, number, number]} a
@@ -127,7 +139,8 @@ export const cover = {
 	 * (360 rays); each ray stops at the first wall it meets, and a wall met by several rays
 	 * counts once. Then it takes a closer look where two of the rays it is about to return are
 	 * less than a degree apart: around the middle between them, a degree to either side, it sends
-	 * a ray every 0.05 degrees, and adds the walls those rays find.
+	 * a ray every 0.05 degrees, and adds the walls those rays find. The look is level, at the
+	 * height of `point`, and takes in the walls that stand at that height.
 	 *
 	 * @param {string} treeJson
 	 * @param {[number, number, number]} point
@@ -154,7 +167,8 @@ export const cover = {
 	 * With `picture`, the call also path traces a picture of the light and leaves it on
 	 * `cover.canvas`: one pixel per place of the tree's root cell, from black (no light) to white,
 	 * counting the light that comes straight from `point` and the light that walls throw back.
-	 * The call returns when the picture is drawn.
+	 * The picture shows the light on a floor at the height of `point`. The call returns when the
+	 * picture is drawn.
 	 *
 	 * @param {{ width: number, height: number, samples: number, bounces: number }} [picture]
 	 *   `width` and `height`: size of the picture in pixels; `samples`: paths followed per pixel
@@ -174,9 +188,16 @@ export const cover = {
 	 * Path traces a picture of the light of any number of light sources and leaves it on
 	 * `cover.canvas`: one pixel per place of the tree's root cell, black where no light gets to,
 	 * in the color of the light that does, counting the light that comes straight from a source
-	 * and the light that walls throw back. The picture is made for a screen (gamma 2.2), so it
-	 * can be shown as it is; the brightest light of one source is white, and more light than
-	 * that is white too. The call returns when the picture is drawn.
+	 * and the light that walls and flat surfaces throw back. The picture is made for a screen
+	 * (gamma 2.2), so it can be shown as it is; the brightest light of one source is white, and
+	 * more light than that is white too. The call returns when the picture is drawn.
+	 *
+	 * The picture shows the light on the floor of the map, which lies level at the height
+	 * `picture.floor`. Light runs through the room above it: a source is at its own height, a
+	 * wall stops light between its bottom and its top (light passes over a low wall and under a
+	 * raised one, and the wall's shadow on the floor is as long as that makes it), and a surface
+	 * that stops light does so over its area. How far a place is from a source, for the reach of
+	 * its light, counts with the difference in height.
 	 *
 	 * Each wall acts on the light the way its object in the tree says in `w` (Foundry's values):
 	 * `light` 0 lets light through, 10 (limited) stops light that has crossed another limited
@@ -191,7 +212,8 @@ export const cover = {
 	 * metallic nor smooth.
 	 *
 	 * @param {string} treeJson
-	 * @param {object[]} lights per source: `x`, `y`; `radius`, how far its light reaches, and
+	 * @param {object[]} lights per source: `x`, `y` and `z`, its height (0 if left out);
+	 *   `radius`, how far its light reaches, and
 	 *   `bright`, how far its bright light does (the rest is dim, half as bright), in map units;
 	 *   `color`, `[r, g, b]` from 0 to 1 (white if left out); `walls`, false for a source that
 	 *   shines through walls; `angle`, the width of its cone in degrees (360 or left out: all
@@ -204,18 +226,19 @@ export const cover = {
 	 * @param {{ width: number, height: number, samples: number, bounces: number, smoothing: number, wallHeight: number }} picture
 	 *   as for `testLightAdaptive`, and `smoothing`: how many times the light the walls throw
 	 *   back is smoothed to take the noise of path tracing out of it, 0 to 6 (3 if left out;
-	 *   0 leaves the noise in). Smoothing never spreads light through a wall. `wallHeight`: how
-	 *   high the walls stand, in map units. The light a wall throws back spreads upwards too, so
-	 *   it thins out along the floor: a half is left one wall height away, a fifth two heights
-	 *   away. 0, or left out, stands for a flat map, where reflected light carries all the way.
+	 *   0 leaves the noise in). Smoothing never spreads light through a wall that stands on the
+	 *   floor. `floor`: the height of the floor the picture shows (0 if left out). `wallHeight`:
+	 *   up to how far above the floor a wall without a top throws light back, in map units (above
+	 *   its own bottom, where that is higher). Such a wall is lit as high up as the light of a
+	 *   source carries, and would throw all of that back down; 0, or left out, lets it.
 	 *   `antialias`: at how many places of a pixel's side the light that comes straight from the
 	 *   sources is taken, 1 to 4 (1 if left out). Above 1 the edges of shadows and of the reach
 	 *   of a source come out smooth and not in steps; 3 takes nine places per pixel.
-	 * @returns {{ lights: number, walls: number }} how many sources, and how many walls that
-	 *   act on light, took part
+	 * @returns {{ lights: number, walls: number, surfaces: number }} how many sources, how many
+	 *   walls that act on light, and how many triangles of surfaces that stop light took part
 	 */
 	traceLights(treeJson, lights, picture) {
-		const { width = 0, height = 0, samples = 0, bounces = 0, smoothing = 3, wallHeight = 0, antialias = 1 } = picture || {};
+		const { width = 0, height = 0, samples = 0, bounces = 0, smoothing = 3, wallHeight = 0, antialias = 1, floor = 0 } = picture || {};
 		// a source whose light reaches nowhere takes no part
 		lights = lights.filter((light) => light.radius > 0);
 		if (width > 0 && height > 0 && (canvas.width !== width || canvas.height !== height)) {
@@ -232,11 +255,11 @@ export const cover = {
 			// the same curve Foundry puts the setting through before its shaders get it
 			const soft = (Math.cos(Math.PI * Math.pow(Math.min(Math.max(attenuation, 0), 1), 1.5)) - 1) / -2;
 			M.HEAPF32.set([light.x, light.y, light.radius, light.bright ?? 0, color[0], color[1], color[2], light.walls === false ? 0 : 1,
-				cone[0], cone[1], cone[2], soft, light.externalRadius ?? 0, Math.pow(Math.min(Math.max(dimLevel, 0), 1), 2.2), light.reflectedOnly ? 1 : 0, 0], pLights / 4 + index * 16);
+				cone[0], cone[1], cone[2], soft, light.externalRadius ?? 0, Math.pow(Math.min(Math.max(dimLevel, 0), 1), 2.2), light.reflectedOnly ? 1 : 0, light.z ?? 0], pLights / 4 + index * 16);
 		});
 		try {
 			M._test_local_gpu_lib_collect(ctx);
-			const result = M._test_local_gpu_lib_trace_lights(ctx, BigInt(pTree), BigInt(pLights), lights.length, width, height, samples, bounces, smoothing, wallHeight, antialias);
+			const result = M._test_local_gpu_lib_trace_lights(ctx, BigInt(pTree), BigInt(pLights), lights.length, width, height, samples, bounces, smoothing, wallHeight, antialias, floor);
 			const error = M._test_local_gpu_lib_last_error(ctx);
 			if (error) throw new Error(`test_local_gpu: ${readString(error)}`);
 			const values = parseJsonValues(readString(result));
@@ -267,41 +290,54 @@ export const cover = {
 	/**
 	 * How much of each of several round targets the walls hide from a round source.
 	 *
-	 * Only walls that stop movement hide anything: an object of the tree whose `w.move` is 0
-	 * (Foundry's value for a wall that lets movement through, and for an open door) is left
-	 * out, and a one-way wall (`w.dir` 1 or 2) hides only what is looked at from the side it
-	 * acts from. An object without `w` is a wall that stops movement from both sides.
+	 * A target is an upright cylinder: a circle on the map, from its bottom up to its top. What
+	 * is hidden of it is a share of what the source sees of it, its width by its height.
+	 *
+	 * Only walls and surfaces that stop movement hide anything: an object of the tree whose
+	 * `w.move` is 0 (Foundry's value for a wall that lets movement through, and for an open door)
+	 * is left out, and a one-way wall (`w.dir` 1 or 2) hides only what is looked at from the side
+	 * it acts from. A wall hides what is seen through it between its bottom and its top; a look
+	 * that passes over or under it is free. An object without `w` is a wall that stops movement
+	 * from both sides, as deep and as high as the map goes.
 	 *
 	 * For each target, the source is looked from at `points` points, spread evenly along its
 	 * diameter that lies across the line from source to that target (the first point is one end
-	 * of that diameter, the last the other). From each point, the sector between the two rays
-	 * that just touch the target circle is swept with rays at most 0.05 degrees apart; a ray a
-	 * wall crosses before it reaches the circle counts as blocked.
+	 * of that diameter, the last the other), all at the height of `source`. From each point, the
+	 * sector between the two directions that just touch the target circle is swept in directions
+	 * at most 0.05 degrees apart, and in each direction the target is looked at at `heights`
+	 * heights, spread evenly from its bottom to its top. A ray that a wall or a surface stops
+	 * before it reaches the target counts as blocked.
 	 *
 	 * @param {string} treeJson
-	 * @param {[number, number, number]} source centre of the source
-	 * @param {[number, number, number][]} targets centres of the targets
+	 * @param {[number, number, number]} source centre of the source, at the height it looks from
+	 * @param {[number, number, number, number?][]} targets per target the centre on the map, its
+	 *   bottom and its top; a target without a top is flat, and is looked at at its one height
 	 * @param {number} sourceDiameter in map units
 	 * @param {number} targetDiameter of every target, in map units
 	 * @param {number} points how many points of the source to look from (at least 1)
-	 * @returns {{ target: object, lineA: object, lineB: object, obstructed: number, points: object[] }[]}
-	 *   one result per target, in the order of `targets`. `target`: its centre; `lineA` and
-	 *   `lineB`: the ends of the source's diameter used for it; `obstructed`: the smallest share
-	 *   of the target that any of the points cannot see, 0 to 1; `points`: per point `at`,
-	 *   `rayA` and `rayB` (the two touching rays), `rays` (sent), `blocked` (stopped by a wall),
-	 *   `obstructed` (blocked / rays) and `runs`: stretches of neighbouring rays that end the
-	 *   same way, each `{ blocked, from, to }` with `from` and `to` on the target circle
+	 * @param {number} [heights] at how many heights to look at a target, 1 to 24 (1 if left out,
+	 *   which is the middle of the target)
+	 * @returns {{ target: object, top: number, heights: number, lineA: object, lineB: object, obstructed: number, points: object[] }[]}
+	 *   one result per target, in the order of `targets`. `target`: its centre, at its bottom;
+	 *   `top`: its top; `heights`: at how many heights it was looked at; `lineA` and `lineB`:
+	 *   the ends of the source's diameter used for it; `obstructed`: the smallest share of the
+	 *   target that any of the points cannot see, 0 to 1; `points`: per point `at`, `rayA` and
+	 *   `rayB` (the two touching rays, on the map), `rays` (sent), `blocked` (stopped),
+	 *   `obstructed` (blocked / rays) and `runs`: stretches of neighbouring directions of which
+	 *   equally much is blocked, each `{ blocked, share, from, to }` with `share` the blocked
+	 *   share of the heights (`blocked` is true for all of them) and `from` and `to` on the
+	 *   target circle
 	 */
-	testCover(treeJson, source, targets, sourceDiameter, targetDiameter, points) {
+	testCover(treeJson, source, targets, sourceDiameter, targetDiameter, points, heights = 1) {
 		const pTree = allocString(treeJson);
 		const pSource = allocFloat3(source);
-		// the targets one after the other, 12 bytes each (at least one byte, so the pointer is real)
-		const pTargets = M._malloc(Math.max(1, targets.length * 12));
-		targets.forEach(([x, y, z], index) => M.HEAPF32.set([x, y, z], pTargets / 4 + index * 3));
+		// the targets one after the other, 16 bytes each (at least one byte, so the pointer is real)
+		const pTargets = M._malloc(Math.max(1, targets.length * 16));
+		targets.forEach(([x, y, z, top = z], index) => M.HEAPF32.set([x, y, z, top], pTargets / 4 + index * 4));
 		try {
 			M._test_local_gpu_lib_collect(ctx);
 			const result = M._test_local_gpu_lib_test_cover(ctx, BigInt(pTree), BigInt(pSource), BigInt(pTargets), targets.length,
-				sourceDiameter, targetDiameter, points);
+				sourceDiameter, targetDiameter, points, heights);
 			const error = M._test_local_gpu_lib_last_error(ctx);
 			if (error) throw new Error(`test_local_gpu: ${readString(error)}`);
 			const values = parseJsonValues(readString(result));

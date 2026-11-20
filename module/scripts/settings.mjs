@@ -1,6 +1,7 @@
 // What can be switched and set for the view. Everything is kept per browser (client scope),
-// but whether the light is path traced and how high the walls stand: that is the lighting of
-// the scene, the same for every user, so it is kept with the world and only a GM can set it.
+// but whether the light is path traced and how high a wall without a top throws light back:
+// that is the lighting of the scene, the same for every user, so it is kept with the world and
+// only a GM can set it.
 // The switches are the toggle tools of the view's scene controls; the numbers are edited in the
 // dialog behind its "Settings" tool, and in Foundry's module settings.
 
@@ -29,7 +30,8 @@ export const NUMBERS = {
 	bounces: { initial: 2, min: 0, max: 16, integer: true },
 	smoothing: { initial: 3, min: 0, max: 6, integer: true },
 	antialias: { initial: 4, min: 1, max: 4, integer: true },
-	// in grid squares; part of how the scene is lit, so it is kept with the world
+	// in grid squares, for walls that name no top; part of how the scene is lit, so it is kept
+	// with the world
 	wallHeight: { initial: 2, min: 0, max: 100, integer: false, world: true },
 	// in shares of how bright dim light looks; part of what tokens see, so kept with the world
 	litLevel: { initial: 0.5, min: 0.05, max: 1, integer: false, world: true },
@@ -37,6 +39,8 @@ export const NUMBERS = {
 	mirrorChain: { initial: 3, min: 1, max: 8, integer: true, world: true },
 	pictureWidth: { initial: 1024, min: 64, max: 4096, integer: true },
 	points: { initial: 5, min: 1, max: 200, integer: true },
+	// at how many heights a target is looked at, from its feet to its head
+	heights: { initial: 6, min: 1, max: 24, integer: true },
 	// 0 stands for "as wide as the token"
 	sourceDiameter: { initial: 0, min: 0, max: 100000, integer: false },
 	targetDiameter: { initial: 0, min: 0, max: 100000, integer: false },

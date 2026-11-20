@@ -1,0 +1,495 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>library checks</title>
+<body style="margin:0;background:#1b1b1b;color:#ddd;font:13px monospace">
+<pre id="out" style="margin:0;padding:8px">running</pre>
+<div id="pictures" style="padding:8px"></div>
+<script type="module">
+// Checks of the built library (module/lib) against answers worked out here in plain JavaScript,
+// and, where a map without heights has to give what it always gave, against an earlier build
+// (served under /old/, see server.mjs). The outcome is on the page and in window.report;
+// window.done turns true at the end. A check passes when its row says ok: true.
+const out = document.getElementById('out');
+const report = { stage: 'loading' };
+window.report = report;
+window.done = false;
+const show = () => { out.textContent = JSON.stringify(report, null, 1); };
+try {
+	const stamp = `?v=${Date.now()}`;
+	const gpu = (await import(`/module/lib/test_local_gpu_api.js${stamp}`)).cover;
+	let old = null;
+	try {
+		if ((await fetch('/old/test_local_gpu_api.js', { method: 'HEAD' })).ok) old = (await import(`/old/test_local_gpu_api.js${stamp}`)).cover;
+	} catch (error) {
+		old = null;
+	}
+	report.oldLibrary = Boolean(old);
+	const plainJson = await (await fetch('/test/data/walls.json')).text();
+	const plain = JSON.parse(plainJson);
+	const b = plain.nodes[plain.root].bounds;
+	let seed = 77;
+	const random = () => { seed = (Math.imul(seed, 1664525) + 1013904223) | 0; return (seed >>> 0) / 4294967296; };
+	const pick = (list) => list[Math.floor(random() * list.length)];
+	const place = () => [Math.round(b.x + random() * b.width), Math.round(b.y + random() * b.height)];
+	const NONE = 0, LIMITED = 10, NORMAL = 20, PROXIMITY = 30, DISTANCE = 40;
+	const BIG = 1e9;
+
+	// --- maps -------------------------------------------------------------------------------
+	// the real map with properties: every wall gets the same ones in each cell that stores it
+	const withProps = (choose, surfaces) => {
+		const tree = JSON.parse(plainJson);
+		const props = new Map();
+		for (const node of tree.nodes) for (const o of node.objects) {
+			const key = [o.t.a.x, o.t.a.y, o.t.b.x, o.t.b.y].join();
+			if (!props.has(key)) props.set(key, choose(o));
+			o.w = props.get(key);
+		}
+		if (surfaces) tree.surfaces = surfaces;
+		return tree;
+	};
+	const heights = () => {
+		const said = {};
+		const bottom = pick([null, null, 0, 0, 60, 150]);
+		const top = pick([null, null, 40, 100, 200, 400]);
+		if (bottom !== null) said.bottom = bottom;
+		if (top !== null && top > (bottom ?? -BIG)) said.top = top;
+		return said;
+	};
+	const triangle = () => {
+		const [x, y] = place();
+		const size = 300 + random() * 900;
+		return [x, y, Math.round(x + size), Math.round(y + (random() - 0.5) * size), Math.round(x + (random() - 0.5) * size), Math.round(y + size)];
+	};
+	const someSurfaces = () => Array.from({ length: 10 }, () => ({ z: pick([0, 50, 120, 250]), light: random() < 0.7 ? 1 : 0, move: random() < 0.7 ? 1 : 0,
+		t: [...triangle(), ...(random() < 0.5 ? triangle() : [])] }));
+	const high = withProps(() => ({ move: random() < 0.25 ? NONE : NORMAL, light: pick([NONE, LIMITED, NORMAL, NORMAL, NORMAL, PROXIMITY, DISTANCE]), sight: NORMAL, sound: NORMAL,
+		dir: pick([0, 0, 0, 1, 2]), lightThreshold: 0, ...heights() }), someSurfaces());
+	for (const node of high.nodes) for (const o of node.objects) if (o.w.light >= PROXIMITY) o.w.lightThreshold ||= 300 + Math.round(random() * 900);
+	const highJson = JSON.stringify(high);
+	const single = (walls, surfaces = [], bounds = { x: 0, y: 0, width: 1000, height: 800 }) => JSON.stringify({ root: 0, surfaces, nodes: [{ bounds, nodes: [],
+		objects: walls.map(({ c, w }) => ({ n: 1, r: { x: Math.min(c[0], c[2]), y: Math.min(c[1], c[3]), width: Math.abs(c[2] - c[0]), height: Math.abs(c[3] - c[1]) },
+			t: { a: { x: c[0], y: c[1] }, b: { x: c[2], y: c[3] } }, w })) }] });
+
+	// --- the reference ----------------------------------------------------------------------
+	// every wall of a tree once, as the reference takes it
+	const wallsOfTree = (tree) => {
+		const seen = new Map();
+		for (const node of tree.nodes) for (const o of node.objects) {
+			const w = o.w ?? {};
+			const wall = { ox: o.t.a.x, oy: o.t.a.y, dx: o.t.b.x - o.t.a.x, dy: o.t.b.y - o.t.a.y, move: w.move ?? NORMAL, light: w.light ?? NORMAL, dir: w.dir ?? 0,
+				threshold: w.lightThreshold ?? 0, bottom: w.bottom ?? -BIG, top: w.top ?? BIG, box: o.r };
+			seen.set([wall.ox, wall.oy, wall.dx, wall.dy, wall.bottom, wall.top].join(), wall);
+		}
+		return [...seen.values()];
+	};
+	const trianglesOf = (tree, what) => {
+		const list = [];
+		for (const s of tree.surfaces ?? []) {
+			if (what && !s[what]) continue;
+			for (let i = 0; i + 5 < s.t.length; i += 6) list.push({ z: s.z, a: [s.t[i], s.t[i + 1]], b: [s.t[i + 2], s.t[i + 3]], c: [s.t[i + 4], s.t[i + 5]] });
+		}
+		return list;
+	};
+	// where the run from o over d crosses the line of a wall, seen from above
+	const hitsWall = (o, d, w) => {
+		const wx = w.ox - o.x, wy = w.oy - o.y;
+		const den = d.x * w.dy - d.y * w.dx;
+		if (den === 0) return null;
+		const t = wx * w.dy - wy * w.dx, u = wx * d.y - wy * d.x;
+		const hit = den > 0 ? (t >= 0 && t <= den && u >= 0 && u <= den) : (t <= 0 && t >= den && u <= 0 && u >= den);
+		return hit ? { at: t / den, den } : null;
+	};
+	const hitsSurface = (o, d, s) => {
+		const lo = Math.min(o.z, o.z + d.z), hi = Math.max(o.z, o.z + d.z);
+		if (!(s.z > lo && s.z <= hi)) return false;
+		const at = (s.z - o.z) / d.z;
+		const px = o.x + d.x * at, py = o.y + d.y * at;
+		const side = (p, q) => (q[0] - p[0]) * (py - p[1]) - (q[1] - p[1]) * (px - p[0]);
+		const s1 = side(s.a, s.b), s2 = side(s.b, s.c), s3 = side(s.c, s.a);
+		return (s1 >= 0 && s2 >= 0 && s3 >= 0) || (s1 <= 0 && s2 <= 0 && s3 <= 0);
+	};
+	const offWall = (p, w) => {
+		const vx = p.x - w.ox, vy = p.y - w.oy;
+		const along = Math.min(1, Math.max(0, (vx * w.dx + vy * w.dy) / Math.max(w.dx * w.dx + w.dy * w.dy, 1e-6)));
+		return Math.hypot(vx - w.dx * along, vy - w.dy * along);
+	};
+	const smoothstep = (e0, e1, x) => { const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0))); return t * t * (3 - 2 * t); };
+
+	// true when a wall that stops movement, or a surface that does, stops the ray from o over d
+	const moveStopped = (o, d, walls, surfaces) => {
+		for (const w of walls) {
+			if (w.move === NONE) continue;
+			const hit = hitsWall(o, d, w);
+			if (!hit) continue;
+			if ((w.dir === 1 && hit.den > 0) || (w.dir === 2 && hit.den < 0)) continue;
+			const z = o.z + d.z * hit.at;
+			if (z >= w.bottom && z <= w.top) return true;
+		}
+		return surfaces.some((s) => hitsSurface(o, d, s));
+	};
+	// test_cover, written out: the share of each target no point of the source sees
+	const coverExpected = (tree, source, targets, ds, da, n, m) => {
+		const walls = wallsOfTree(tree);
+		const surfaces = trianglesOf(tree, 'move');
+		return targets.map(([tx, ty, bottom, top = bottom]) => {
+			const levels = top > bottom ? Math.min(Math.max(m, 1), 24) : 1;
+			const tox = tx - source[0], toy = ty - source[1];
+			const apart = Math.hypot(tox, toy);
+			const across = apart > 0.001 ? [-toy / apart, tox / apart] : [0, 1];
+			let least = 1;
+			const count = Math.max(n, 1);
+			for (let i = 0; i < count; i++) {
+				const along = count > 1 ? i / (count - 1) : 0;
+				const p = { x: source[0] + across[0] * ds * (along - 0.5), y: source[1] + across[1] * ds * (along - 0.5), z: source[2] };
+				const far = Math.hypot(tx - p.x, ty - p.y);
+				const radius = da / 2;
+				if (far <= radius || far < 0.001) { least = Math.min(least, 0); continue; }
+				const middle = Math.atan2(ty - p.y, tx - p.x);
+				const half = Math.asin(radius / far);
+				const steps = Math.max(Math.ceil(2 * half / (0.05 * Math.PI / 180)), 1);
+				let blocked = 0;
+				for (let k = 0; k <= steps; k++) {
+					const offset = 2 * half * k / steps - half;
+					const side = far * Math.sin(offset);
+					const reach = far * Math.cos(offset) - Math.sqrt(Math.max(radius * radius - side * side, 0));
+					for (let j = 0; j < levels; j++) {
+						const h = bottom + (top - bottom) * (j + 0.5) / levels;
+						if (moveStopped(p, { x: Math.cos(middle + offset) * reach, y: Math.sin(middle + offset) * reach, z: h - p.z }, walls, surfaces)) blocked++;
+					}
+				}
+				least = Math.min(least, blocked / ((steps + 1) * levels));
+			}
+			return least;
+		});
+	};
+
+	// true when the light of a source at `from` gets to `to`
+	const reaches = (from, to, margin, walls, surfaces) => {
+		let limited = 0;
+		const d = { x: to.x - from.x, y: to.y - from.y, z: to.z - from.z };
+		for (const w of walls) {
+			if (w.light === NONE) continue;
+			const hit = hitsWall(from, d, w);
+			if (!hit) continue;
+			const z = from.z + d.z * hit.at;
+			if (z < w.bottom || z > w.top) continue;
+			if ((w.dir === 1 && hit.den > 0) || (w.dir === 2 && hit.den < 0)) continue;
+			if (w.light >= PROXIMITY && w.threshold > 0) {
+				const apart = offWall(from, w);
+				if (w.light === PROXIMITY ? Math.max(apart - margin, 0) < w.threshold : apart + margin > w.threshold) continue;
+			}
+			if (w.light === LIMITED) { if (++limited > 1) return false; } else return false;
+		}
+		return !surfaces.some((s) => hitsSurface(from, d, s));
+	};
+	// the light that comes straight from the sources to a place, as a pixel holds it
+	const lightExpected = (at, lights, walls, surfaces) => {
+		const sum = [0, 0, 0];
+		for (const l of lights) {
+			if (!(l.radius > 0)) continue;
+			const from = { x: l.x, y: l.y, z: l.z ?? 0 };
+			const apart = Math.hypot(from.x - at.x, from.y - at.y, from.z - at.z);
+			if (apart >= l.radius) continue;
+			const far = apart / l.radius, ratio = Math.min(1, Math.max(0, (l.bright ?? 0) / l.radius));
+			const soft = (Math.cos(Math.PI * Math.pow(l.attenuation ?? 0.5, 1.5)) - 1) / -2;
+			let power = 1 + (Math.pow(l.dimLevel ?? 0.25, 2.2) - 1) * smoothstep(ratio * (0.99 - soft * 0.7), Math.min(1, Math.max(0.0001, ratio * (1.01 + soft * 0.7))), far);
+			if (soft !== 0) power *= 1 - smoothstep(1 - soft, 1, far);
+			const level = Math.hypot(at.x - from.x, at.y - from.y);
+			if ((l.angle ?? 360) < 360 && level > 0) {
+				const middle = ((l.rotation ?? 0) + 90) * Math.PI / 180;
+				if (((at.x - from.x) * Math.cos(middle) + (at.y - from.y) * Math.sin(middle)) / level < Math.cos(l.angle * Math.PI / 360)) continue;
+			}
+			if (l.walls !== false && !reaches(from, at, l.externalRadius ?? 0, walls, surfaces)) continue;
+			const color = l.color ?? [1, 1, 1];
+			for (let c = 0; c < 3; c++) sum[c] += color[c] * power;
+		}
+		return sum.map((v) => 255 * Math.pow(Math.min(v, 1), 1 / 2.2));
+	};
+	const reader = document.createElement('canvas');
+	const pixelsOf = (library = gpu) => {
+		reader.width = library.canvas.width;
+		reader.height = library.canvas.height;
+		const context = reader.getContext('2d', { willReadFrequently: true });
+		context.drawImage(library.canvas, 0, 0);
+		return context.getImageData(0, 0, reader.width, reader.height);
+	};
+	const keep = (title) => {
+		const copy = document.createElement('canvas');
+		copy.width = gpu.canvas.width;
+		copy.height = gpu.canvas.height;
+		copy.getContext('2d').drawImage(gpu.canvas, 0, 0);
+		copy.style.cssText = 'max-width:480px;margin:0 8px 8px 0;border:1px solid #555';
+		copy.title = title;
+		const figure = document.createElement('figure');
+		figure.style.cssText = 'display:inline-block;margin:0';
+		figure.append(copy, Object.assign(document.createElement('figcaption'), { textContent: title }));
+		document.getElementById('pictures').append(figure);
+	};
+	const mean = (image) => { let s = 0; for (let i = 0; i < image.data.length; i += 4) s += image.data[i] + image.data[i + 1] + image.data[i + 2]; return s / (image.data.length * 0.75); };
+
+	// --- A: a ray, against the boxes and the walls as they stand ---------------------------
+	{
+		const walls = wallsOfTree(high);
+		const key = (ox, oy, dx, dy, bottom, top) => [ox, oy, dx, dy, bottom, top].join();
+		const row = { rays: 0, same: 0, level: 0, firstDifference: null };
+		for (let i = 0; i < 300; i++) {
+			const [ax, ay] = place(), [bx, by] = place();
+			// every third ray lies level, as the ray tool of the view sends them
+			const az = Math.round(random() * 300 - 20), bz = i % 3 ? Math.round(random() * 300 - 20) : az;
+			const o = { x: ax, y: ay, z: az }, d = { x: bx - ax, y: by - ay, z: bz - az };
+			const want = new Set();
+			for (const w of walls) {
+				const hit = hitsWall(o, d, w);
+				if (!hit) continue;
+				const z = o.z + d.z * hit.at;
+				if (z >= w.bottom && z <= w.top) want.add(key(w.ox, w.oy, w.dx, w.dy, w.bottom, w.top));
+			}
+			const got = new Set(gpu.test(highJson, [ax, ay, az], [bx, by, bz]).wallHits.map((h) => key(h.t.origin.x, h.t.origin.y, h.t.dir.x, h.t.dir.y, h.bottom <= -BIG ? -BIG : h.bottom, h.top >= BIG ? BIG : h.top)));
+			row.rays++;
+			if (d.z === 0) row.level++;
+			if (want.size === got.size && [...want].every((k) => got.has(k))) row.same++;
+			else row.firstDifference ??= { a: [ax, ay, az], b: [bx, by, bz], want: [...want], got: [...got] };
+		}
+		// one ray in a hundred may graze the top of a wall on the other side in single precision
+		row.ok = row.same >= row.rays - 3;
+		report.rays = row;
+		report.stage = 'A done';
+		show();
+	}
+
+	// --- B: cover on the map with heights, against the reference ----------------------------
+	{
+		const row = { targets: 0, within: 0, worst: 0, partly: 0, ms: 0, firstDifference: null };
+		for (let i = 0; i < 30; i++) {
+			const [sx, sy] = place();
+			const source = [sx, sy, pick([0, 30, 90, 180, 300])];
+			const targets = Array.from({ length: 4 }, () => { const [x, y] = place(); const bottom = pick([0, 0, 0, 50, 130]); return [x, y, bottom, bottom + pick([0, 90, 90, 200])]; });
+			// some close by, where a wall is likelier to hide a part
+			targets.push([sx + 260, sy + 90, 0, 90], [sx - 180, sy + 240, 50, 250]);
+			const m = pick([1, 4, 5, 24]);
+			const started = performance.now();
+			const got = gpu.testCover(highJson, source, targets, 100, 100, 3, m);
+			row.ms += performance.now() - started;
+			const want = coverExpected(high, source, targets, 100, 100, 3, m);
+			got.forEach((result, t) => {
+				const off = Math.abs(result.obstructed - want[t]);
+				row.targets++;
+				row.worst = Math.max(row.worst, +off.toFixed(4));
+				if (want[t] > 0.02 && want[t] < 0.98) row.partly++;
+				if (off <= 0.004) row.within++;
+				else row.firstDifference ??= { source, target: targets[t], m, want: want[t], got: result.obstructed };
+			});
+		}
+		row.ms = +row.ms.toFixed(1);
+		row.ok = row.within === row.targets;
+		report.cover = row;
+		report.stage = 'B done';
+		show();
+	}
+
+	// --- C: cover, cases with one answer ----------------------------------------------------
+	{
+		const wall = (w) => single([{ c: [500, 100, 500, 700], w: { move: NORMAL, light: NORMAL, dir: 0, ...w } }]);
+		const share = (json, source, target, m = 20) => +gpu.testCover(json, source, [target], 0, 40, 1, m)[0].obstructed.toFixed(3);
+		const cases = {
+			// eye at 60, half way a wall up to 60: the lower half of a target from 0 to 120 is hidden
+			lowWallHidesLowerHalf: [share(wall({ top: 60 }), [200, 400, 60], [800, 400, 0, 120]), 0.5],
+			// the same wall hides all of a target no higher than the eye
+			lowWallHidesLowTarget: [share(wall({ top: 60 }), [200, 400, 60], [800, 400, 0, 60]), 1],
+			// an eye above the wall, looking at a target that is all above it
+			overTheWall: [share(wall({ top: 60 }), [200, 400, 100], [800, 400, 80, 200]), 0],
+			// a wall that begins at 60: what is seen below it is free
+			underARaisedWall: [share(wall({ bottom: 60 }), [200, 400, 0], [800, 400, 0, 60]), 0],
+			raisedWallHidesUpperHalf: [share(wall({ bottom: 60 }), [200, 400, 60], [800, 400, 0, 120]), 0.5],
+			// a wall that names no heights hides everything, whatever the heights of the two
+			wallWithoutHeights: [share(wall({}), [200, 400, 500], [800, 400, -300, 900]), 1],
+			// a wall that lets movement through hides nothing
+			noMoveWall: [share(wall({ move: NONE, top: 60 }), [200, 400, 60], [800, 400, 0, 60]), 0],
+			// one height only: the middle of the target, which the wall of 60 hides from an eye at 60
+			oneHeight: [share(wall({ top: 60 }), [200, 400, 60], [800, 400, 0, 100], 1), 1],
+			// a floor between the two: seen from above, a target under it is hidden
+			throughAFloor: [share(single([], [{ z: 100, light: 1, move: 1, t: [300, 100, 900, 100, 900, 700, 300, 100, 900, 700, 300, 700] }]), [200, 400, 200], [800, 400, 0, 80]), 1],
+			// standing on that floor, another that stands on it is in full view
+			onTheSameFloor: [share(single([], [{ z: 100, light: 1, move: 1, t: [0, 0, 1000, 0, 1000, 800, 0, 0, 1000, 800, 0, 800] }]), [200, 400, 190], [800, 400, 100, 190]), 0],
+			// a floor that does not stop movement hides nothing
+			floorWithoutMove: [share(single([], [{ z: 100, light: 1, move: 0, t: [300, 100, 900, 100, 900, 700, 300, 100, 900, 700, 300, 700] }]), [200, 400, 200], [800, 400, 0, 80]), 0],
+		};
+		const wrong = Object.entries(cases).filter(([, [got, want]]) => Math.abs(got - want) > 0.011).map(([name, [got, want]]) => ({ name, got, want }));
+		report.coverCases = { cases: Object.keys(cases).length, wrong, ok: wrong.length === 0 };
+		report.stage = 'C done';
+		show();
+	}
+
+	// --- D: cover on a map without heights is what it always was ----------------------------
+	if (old) {
+		const flat = withProps(() => ({ move: random() < 0.3 ? NONE : NORMAL, light: NORMAL, sight: NORMAL, sound: NORMAL, dir: pick([0, 0, 1, 2]), lightThreshold: 0 }));
+		const flatJson = JSON.stringify(flat);
+		const row = { targets: 0, same: 0, sameWithHeights: 0, firstDifference: null };
+		for (let i = 0; i < 25; i++) {
+			const source = [...place(), 0];
+			const targets = Array.from({ length: 4 }, () => [...place(), 0]);
+			const before = old.testCover(flatJson, source, targets, 100, 100, 3);
+			const now = gpu.testCover(flatJson, source, targets, 100, 100, 3);
+			// walls without heights hide all of a target, however high it stands
+			const tall = gpu.testCover(flatJson, [source[0], source[1], 70], targets.map(([x, y]) => [x, y, -40, 260]), 100, 100, 3, 6);
+			before.forEach((result, t) => {
+				row.targets++;
+				if (result.obstructed === now[t].obstructed && result.points.every((q, k) => q.rays === now[t].points[k].rays && q.blocked === now[t].points[k].blocked)) row.same++;
+				else row.firstDifference ??= { source, target: targets[t], before: result.obstructed, now: now[t].obstructed };
+				if (Math.abs(result.obstructed - tall[t].obstructed) < 1e-6) row.sameWithHeights++;
+			});
+		}
+		row.ok = row.same === row.targets && row.sameWithHeights === row.targets;
+		report.coverFlatAsBefore = row;
+		report.stage = 'D done';
+		show();
+	}
+
+	// --- E: the light straight from the sources, against the reference ----------------------
+	const compare = (name, json, lights, picture, near = 6) => {
+		const tree = JSON.parse(json);
+		const area = tree.nodes[tree.root].bounds;
+		const walls = wallsOfTree(tree);
+		const surfaces = trianglesOf(tree, 'light');
+		const started = performance.now();
+		const took = gpu.traceLights(json, lights, { ...picture, samples: 1, bounces: 0 });
+		const ms = performance.now() - started;
+		const image = pixelsOf();
+		keep(name);
+		const row = { took, ms: +ms.toFixed(1), pixels: 0, lit: 0, worst: 0, offByMoreThan3: 0, offAwayFromEdges: 0, example: null };
+		const floor = picture.floor ?? 0;
+		for (let y = 3; y < picture.height; y += 7) for (let x = 3; x < picture.width; x += 7) {
+			const at = { x: area.x + area.width * (x + 0.5) / picture.width, y: area.y + area.height * (y + 0.5) / picture.height, z: floor };
+			const want = lightExpected(at, lights, walls, surfaces);
+			const index = (y * picture.width + x) * 4;
+			const got = [image.data[index], image.data[index + 1], image.data[index + 2]];
+			const off = Math.max(...want.map((v, c) => Math.abs(v - got[c])));
+			row.pixels++;
+			if (Math.max(...got) > 8) row.lit++;
+			row.worst = Math.max(row.worst, +off.toFixed(1));
+			if (off > 3) {
+				row.offByMoreThan3++;
+				// a pixel right at the edge of a shadow or of a light's reach may fall on either
+				// side of it in single precision; anywhere else it has to match
+				let steady = true;
+				for (const [dx, dy] of [[near, 0], [-near, 0], [0, near], [0, -near], [near, near], [-near, -near], [near, -near], [-near, near]]) {
+					const other = lightExpected({ x: at.x + dx, y: at.y + dy, z: floor }, lights, walls, surfaces);
+					if (Math.max(...other.map((v, c) => Math.abs(v - want[c]))) > 3) steady = false;
+				}
+				if (steady) { row.offAwayFromEdges++; row.example ??= { at, want: want.map(Math.round), got }; }
+			}
+		}
+		row.ok = row.offAwayFromEdges === 0 && row.lit > 0;
+		report[name] = row;
+		report.stage = name + ' done';
+		show();
+	};
+	const mapSize = { width: 600, height: Math.round(600 * b.height / b.width) };
+	const lamps = Array.from({ length: 6 }, (_, i) => { const [x, y] = place(); return { x, y, z: [0, 90, 220, 60, 400, 0][i], radius: 1100 + 300 * i, bright: 300 * i,
+		color: [1, 1 - 0.1 * i, 0.5 + 0.08 * i], externalRadius: i % 2 ? 50 : 0 }; });
+	compare('lightOnTheMap', highJson, lamps, mapSize, 12);
+	compare('lightOnARaisedFloor', highJson, lamps, { ...mapSize, floor: 120 }, 12);
+	// one wall of every height, a roof, and sources at three heights
+	const yard = single([
+		{ c: [300, 100, 300, 700], w: { light: NORMAL, dir: 0, top: 60 } },
+		{ c: [500, 100, 500, 700], w: { light: NORMAL, dir: 0, bottom: 80 } },
+		{ c: [700, 100, 700, 400], w: { light: NORMAL, dir: 0 } },
+		{ c: [700, 420, 700, 700], w: { light: LIMITED, dir: 0, top: 200 } },
+		{ c: [820, 420, 820, 700], w: { light: LIMITED, dir: 0, top: 200 } },
+	], [{ z: 150, light: 1, move: 1, t: [350, 250, 480, 250, 480, 550, 350, 250, 480, 550, 350, 550] }, { z: 150, light: 0, move: 1, t: [50, 50, 250, 50, 150, 250] }]);
+	const size = { width: 500, height: 400 };
+	compare('lightOverALowWall', yard, [{ x: 150, y: 400, z: 180, radius: 1200, bright: 600 }], size);
+	compare('lightFromTheFloor', yard, [{ x: 150, y: 400, z: 0, radius: 1200, bright: 600 }], size);
+	compare('lightFromAbove', yard, [{ x: 420, y: 400, z: 400, radius: 1500, bright: 700, color: [1, 0.8, 0.6] }, { x: 900, y: 150, z: 20, radius: 600, bright: 100, angle: 120, rotation: 90 }], size);
+
+	// --- F: light on a map without heights is what it always was -----------------------------
+	if (old) {
+		const flat = withProps(() => ({ move: NORMAL, light: pick([NONE, LIMITED, NORMAL, NORMAL, PROXIMITY, DISTANCE]), sight: NORMAL, sound: NORMAL, dir: pick([0, 0, 1, 2]), lightThreshold: 300 + Math.round(random() * 900) }));
+		const flatJson = JSON.stringify(flat);
+		const flatLamps = lamps.map(({ z, ...lamp }) => lamp);
+		old.traceLights(flatJson, flatLamps, { ...mapSize, samples: 1, bounces: 0, antialias: 2 });
+		const before = pixelsOf(old);
+		gpu.traceLights(flatJson, flatLamps, { ...mapSize, samples: 1, bounces: 0, antialias: 2 });
+		const now = pixelsOf();
+		let worst = 0, differing = 0;
+		for (let i = 0; i < now.data.length; i++) {
+			const off = Math.abs(now.data[i] - before.data[i]);
+			worst = Math.max(worst, off);
+			if (off > 1) differing++;
+		}
+		report.lightFlatAsBefore = { pixels: now.data.length / 4, worst, differingByMoreThan1: differing, ok: differing === 0 };
+		report.stage = 'F done';
+		show();
+	}
+
+	// --- G: the light that is thrown back ----------------------------------------------------
+	{
+		const row = {};
+		// a room closed all round, the source outside it: no light gets in, smoothed or not
+		const room = single([
+			{ c: [400, 200, 700, 200], w: { light: NORMAL } }, { c: [700, 200, 700, 500], w: { light: NORMAL } },
+			{ c: [700, 500, 400, 500], w: { light: NORMAL } }, { c: [400, 500, 400, 200], w: { light: NORMAL } },
+			{ c: [100, 100, 100, 700], w: { light: NORMAL } }, { c: [100, 700, 900, 700], w: { light: NORMAL } },
+		]);
+		const inRoom = (image, pictureSize) => {
+			let most = 0;
+			for (let y = 0; y < pictureSize.height; y++) for (let x = 0; x < pictureSize.width; x++) {
+				const px = 1000 * (x + 0.5) / pictureSize.width, py = 800 * (y + 0.5) / pictureSize.height;
+				if (px > 410 && px < 690 && py > 210 && py < 490) most = Math.max(most, image.data[(y * pictureSize.width + x) * 4]);
+			}
+			return most;
+		};
+		gpu.traceLights(room, [{ x: 250, y: 400, z: 50, radius: 900, bright: 500 }], { ...size, samples: 32, bounces: 3, smoothing: 4, antialias: 2 });
+		row.brightestInClosedRoom = inRoom(pixelsOf(), size);
+		keep('closed room, walls without a top');
+		// the same room with walls that end at 100: a source higher up shines in over them
+		const lowRoom = room.replaceAll('"light":20', '"light":20,"top":100');
+		gpu.traceLights(lowRoom, [{ x: 250, y: 400, z: 300, radius: 900, bright: 500 }], { ...size, samples: 32, bounces: 3, smoothing: 4, antialias: 2 });
+		row.brightestInLowRoom = inRoom(pixelsOf(), size);
+		keep('the room with low walls, source above them');
+		// thrown back light: a tall wall gives more than a low one, and none without bounces
+		const corridor = (top) => single([{ c: [600, 50, 600, 750], w: { light: NORMAL, ...(top ? { top } : {}) } }]);
+		const lamp = [{ x: 450, y: 400, z: 40, radius: 500, bright: 250, reflectedOnly: true }];
+		const thrown = (json, more = {}) => { gpu.traceLights(json, lamp, { ...size, samples: 64, bounces: 2, smoothing: 3, ...more }); return +mean(pixelsOf()).toFixed(3); };
+		row.thrownBackByAWallOf40 = thrown(corridor(40));
+		row.thrownBackByAWallOf400 = thrown(corridor(400));
+		row.thrownBackWithoutBounces = thrown(corridor(400), { bounces: 0 });
+		row.thrownBackWithoutATopUpTo200 = thrown(corridor(0), { wallHeight: 200 });
+		row.thrownBackWithoutATop = thrown(corridor(0));
+		keep('light thrown back by one wall without a top');
+		// a roof over the source keeps the light under it and throws it back down
+		const roofed = single([{ c: [600, 50, 600, 750], w: { light: NORMAL, top: 40 } }], [{ z: 120, light: 1, move: 1, t: [200, 150, 700, 150, 700, 650, 200, 150, 700, 650, 200, 650] }]);
+		row.thrownBackUnderARoof = thrown(roofed);
+		keep('light thrown back under a roof');
+		// what a full picture of the real map costs
+		const big = { width: 1024, height: Math.round(1024 * b.height / b.width) };
+		const times = [];
+		for (let i = 0; i < 3; i++) { const t0 = performance.now(); gpu.traceLights(highJson, lamps, { ...big, samples: 32, bounces: 2, smoothing: 3, antialias: 4, wallHeight: 200 }); times.push(+(performance.now() - t0).toFixed(1)); }
+		row.msPerPicture = times;
+		row.meanOnTheMap = +mean(pixelsOf()).toFixed(2);
+		keep('the map: 32 paths, 2 bounces, smoothed');
+		if (old) {
+			const flatLamps = lamps.map(({ z, ...l }) => l);
+			const oldTimes = [];
+			for (let i = 0; i < 3; i++) { const t0 = performance.now(); old.traceLights(plainJson, flatLamps, { ...big, samples: 32, bounces: 2, smoothing: 3, antialias: 4, wallHeight: 200 }); oldTimes.push(+(performance.now() - t0).toFixed(1)); }
+			row.msPerPictureBefore = oldTimes;
+			row.meanFlatBefore = +mean(pixelsOf(old)).toFixed(2);
+			gpu.traceLights(plainJson, flatLamps, { ...big, samples: 32, bounces: 2, smoothing: 3, antialias: 4, wallHeight: 200 });
+			row.meanFlatNow = +mean(pixelsOf()).toFixed(2);
+			keep('the map without heights');
+			old.traceLights(plainJson, flatLamps, { ...big, samples: 32, bounces: 0, smoothing: 3, antialias: 4 });
+			row.meanFlatStraightOnly = +mean(pixelsOf(old)).toFixed(2);
+		}
+		row.ok = row.brightestInClosedRoom <= 1 && row.brightestInLowRoom > 40 && row.thrownBackByAWallOf400 > row.thrownBackByAWallOf40 * 1.5
+			&& row.thrownBackWithoutATop >= row.thrownBackWithoutATopUpTo200 && row.thrownBackWithoutATopUpTo200 > row.thrownBackByAWallOf40
+			&& row.thrownBackWithoutBounces === 0 && row.thrownBackUnderARoof > row.thrownBackByAWallOf40;
+		report.thrownBack = row;
+	}
+	report.allOk = Object.values(report).every((row) => typeof row !== 'object' || row === null || row.ok !== false);
+	report.stage = 'done';
+} catch (error) {
+	report.error = String(error && error.stack ? error.stack : error);
+}
+show();
+window.done = true;
+</script>

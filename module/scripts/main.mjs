@@ -1,7 +1,9 @@
 // Cover: Quadtree View. Draws the GPU quadtree view (rays, the path traced light of the
-// scene's light sources, cover test of the selected token) on the canvas of the scene,
-// working on the walls in game.canvas.walls.quadtree and on what each of them stops. The view is a canvas layer with a set of scene controls of its
-// own (see layer.mjs); it is shown, and can be used, whichever controls are active.
+// scene's light sources, cover test of the selected token) on the canvas of the scene, working
+// on the walls in game.canvas.walls.quadtree, on what each of them stops and between which
+// heights it stands, and on the floors and roofs that regions define (see heights.mjs). The
+// view is a canvas layer with a set of scene controls of its own (see layer.mjs); it is shown,
+// and can be used, whichever controls are active.
 
 import { CoverViewLayer } from './layer.mjs';
 import { quadtreeJson } from './quadtree.mjs';
@@ -20,9 +22,12 @@ Hooks.once('init', () => {
 		lightLevelAt: (point) => canvas[LAYER]?.lightLevelAt(point) ?? null,
 		/** True when one token has a line of sight to another by way of mirrors. */
 		seesByMirrors: (observer, target) => canvas[LAYER]?.seesByMirrors(observer, target) ?? false,
+		/** True when one token has a straight line of sight to another, over or under the walls between them. */
+		seesOver: (observer, target) => canvas[LAYER]?.seesOver(observer, target) ?? false,
 		/**
-		 * How much of a token the walls that stop movement hide, 0 to 1, or null: looked at from
-		 * the place `{x, y}`, or, with `source`, from across the token that has its middle there.
+		 * How much of a token the walls and surfaces that stop movement hide, 0 to 1, or null:
+		 * looked at from the place `{x, y}`, or, with `source`, from across the token that has its
+		 * middle there, at the height that token looks from.
 		 */
 		coverShare: (from, token, source) => canvas[LAYER]?.coverShare(from, token, source) ?? null,
 	};
@@ -58,6 +63,16 @@ Hooks.on('visibilityRefresh', (visibility) => canvas[LAYER]?.visionChanged(visib
 
 // What a token sees in a mirror has to follow a wall at once, not after the walls were read anew.
 for (const hook of ['createWall', 'updateWall', 'deleteWall']) Hooks.on(hook, () => canvas[LAYER]?.wallsChanged());
+
+// The floors and roofs are the surfaces of regions: they change with a region's shapes and
+// elevation and with its behaviors. A change of the scene may be one of its levels, or of what
+// Wall Height keeps with the scene.
+for (const hook of ['createRegion', 'updateRegion', 'deleteRegion', 'createRegionBehavior', 'updateRegionBehavior', 'deleteRegionBehavior', 'updateScene']) {
+	Hooks.on(hook, () => {
+		canvas[LAYER]?.wallsChanged();
+		refresh();
+	});
+}
 
 // the sheet of a wall gets the fields for how metallic and how smooth its two faces are
 Hooks.on('renderWallConfig', (app, element) => addSurfaceFields(app, element));

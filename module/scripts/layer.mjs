@@ -12,16 +12,23 @@
 // cover test counts the walls that stop movement only, and the path traced light follows what
 // each wall does to light. Rays work on every wall, whatever it does.
 //
+// All of it happens in a scene that has height (see heights.mjs): a wall stands between its
+// bottom and its top, a token from its feet to its head, and the surfaces of regions are floors
+// and roofs. The cover test looks from the height the selected token looks from at the whole
+// height of each other token; a ray of the view lies level on the floor of the viewed level.
+//
 // The view itself is for the GM. It is shown whichever set of scene controls is active, and its
 // marks can be dragged there too: each mark takes the mouse for itself before the active layer
 // sees it. Only placing a new ray needs the tool of the view's own controls. Results that were
 // tables in the page this replaces are short labels next to the things here.
 
+import { floorHeight, perUnit, surfaceList, tokenHeights } from './heights.mjs';
 import { loadLibrary } from './library.mjs';
 import { PathTracedLighting } from './lighting.mjs';
 import { MirrorVision } from './mirrors.mjs';
 import { quadtreeJson } from './quadtree.mjs';
 import { LAYER, NUMBERS, value, setValue } from './settings.mjs';
+import { Obstacles } from './sight.mjs';
 import { refreshVisioner, visionerHooks } from './wrappers.mjs';
 
 const { InteractionLayer } = foundry.canvas.layers;
@@ -42,6 +49,12 @@ const REACH = 14;
 const wallKey = (ax, ay, bx, by) => [ax, ay, bx, by].join(',');
 const distance = (p, q) => Math.hypot(p.x - q.x, p.y - q.y);
 const errorText = (error) => (error && error.message ? error.message : String(error));
+
+/** A color part of the way from one to another, each as the number PIXI takes. */
+function between(from, to, share) {
+	const part = (shift) => Math.round(((from >> shift) & 255) + (((to >> shift) & 255) - ((from >> shift) & 255)) * share);
+	return (part(16) << 16) | (part(8) << 8) | part(0);
+}
 
 export class CoverViewLayer extends InteractionLayer {
 	/** @inheritDoc */
@@ -115,12 +128,20 @@ export class CoverViewLayer extends InteractionLayer {
 	/** The answers `coverShare` has given on the walls as they are, by what was asked. */
 	#shares = new Map();
 
+	/** What can be in the way of a line of sight: the walls with their heights, and floors and roofs. */
+	#obstacles = new Obstacles();
+
 	/** What tokens see in walls that are mirrors. */
-	#mirrors = new MirrorVision();
+	#mirrors = new MirrorVision(this.#obstacles);
+
+	/** True once a failure of `seenOver` was reported, so that one that repeats is reported once. */
+	#sightFailed = false;
 
 	/**
 	 * The cover test of the selected token, or null while none is selected:
-	 * `{ name, s, ds, top, targets: [{ id, name, p, da, top, result }], ms, error }`.
+	 * `{ name, s, eye, ds, top, targets: [{ id, name, p, bottom, head, da, top, result }], ms, error }`.
+	 * `eye` is the height the source looks from, `bottom` and `head` the heights a target stands
+	 * between, in scene pixels; `top` is how far above its middle a label goes, on the map.
 	 */
 	#coverTest = null;
 
@@ -246,7 +267,7 @@ export class CoverViewLayer extends InteractionLayer {
 	 */
 	refreshTree() {
 		if (!this.#cover || !this.#parts || !canvas.scene || !canvas.walls?.quadtree) return;
-		const json = quadtreeJson(canvas.walls.quadtree);
+		const json = quadtreeJson(canvas.walls.quadtree, surfaceList());
 		if (json === this.#treeJson) return;
 		const tree = JSON.parse(json);
 		const root = tree.nodes[tree.root].bounds;
@@ -297,7 +318,9 @@ export class CoverViewLayer extends InteractionLayer {
 		ray.error = '';
 		let result = { boxHits: [], wallHits: [] };
 		try {
-			result = this.#cover.test(this.#treeJson, [ray.a.x, ray.a.y, 0], [ray.b.x, ray.b.y, 0]);
+			// level, on the floor of the viewed level: it meets the walls that stand there
+			const z = floorHeight();
+			result = this.#cover.test(this.#treeJson, [ray.a.x, ray.a.y, z], [ray.b.x, ray.b.y, z]);
 		} catch (error) {
 			ray.error = errorText(error);
 		}
@@ -325,8 +348,10 @@ export class CoverViewLayer extends InteractionLayer {
 	/**
 	 * Sets up the cover test from the tokens as they are now: the selected token (the first, if
 	 * several are) is the source, every other token of the scene a target. A token counts as a
-	 * circle around its centre, as wide as the token unless a diameter is set for all of them.
-	 * Calculates the test when anything it depends on has changed, or when `anyway` is set.
+	 * circle around its centre, as wide as the token unless a diameter is set for all of them,
+	 * that stands from the token's feet to its head; the source looks from the height the token
+	 * looks from. Calculates the test when anything it depends on has changed, or when `anyway`
+	 * is set.
 	 * @returns {boolean} true when the test was calculated again
 	 */
 	#readTokens(anyway = false) {
@@ -337,20 +362,24 @@ export class CoverViewLayer extends InteractionLayer {
 		if (source) {
 			const describe = (token, diameter) => {
 				// while a token is dragged, its preview is where it is being dragged to
-				const centre = (token._preview ?? token).center;
+				const shown = token._preview ?? token;
+				const centre = shown.center;
 				const size = Math.min(token.w, token.h);
+				const heights = tokenHeights(shown);
 				return { id: token.id, name: token.document.name, p: { x: Math.round(centre.x), y: Math.round(centre.y) },
+					bottom: Math.round(heights.bottom), head: Math.round(heights.top), eye: Math.round(heights.eye),
 					diameter: value(diameter) > 0 ? value(diameter) : size, top: Math.max(token.h, value(diameter)) / 2 };
 			};
 			const s = describe(source, 'sourceDiameter');
-			test = { name: s.name, s: s.p, ds: s.diameter, top: s.top, targets: [], ms: 0, error: '' };
+			test = { name: s.name, s: s.p, eye: s.eye, ds: s.diameter, top: s.top, targets: [], ms: 0, error: '' };
 			for (const token of canvas.tokens.placeables) {
 				if (token === source || token.isPreview) continue;
 				const t = describe(token, 'targetDiameter');
-				test.targets.push({ id: t.id, name: t.name, p: t.p, da: t.diameter, top: t.top, result: null });
+				test.targets.push({ id: t.id, name: t.name, p: t.p, bottom: t.bottom, head: t.head, da: t.diameter, top: t.top, result: null });
 			}
 		}
-		const inputs = test ? JSON.stringify([test.s, test.ds, value('points'), test.targets.map((target) => [target.id, target.p, target.da])]) : '';
+		const inputs = test ? JSON.stringify([test.s, test.eye, test.ds, value('points'), value('heights'),
+			test.targets.map((target) => [target.id, target.p, target.bottom, target.head, target.da])]) : '';
 		if (!anyway && inputs === this.#coverInputs) return false;
 		this.#coverInputs = inputs;
 		this.#coverTest = test;
@@ -369,8 +398,8 @@ export class CoverViewLayer extends InteractionLayer {
 		const started = performance.now();
 		try {
 			for (const [da, targets] of bySize) {
-				const results = this.#cover.testCover(this.#treeJson, [test.s.x, test.s.y, 0], targets.map((target) => [target.p.x, target.p.y, 0]),
-					test.ds, da, value('points'));
+				const results = this.#cover.testCover(this.#treeJson, [test.s.x, test.s.y, test.eye], targets.map((target) => [target.p.x, target.p.y, target.bottom, target.head]),
+					test.ds, da, value('points'), value('heights'));
 				targets.forEach((target, order) => {
 					target.result = results[order];
 				});
@@ -408,8 +437,9 @@ export class CoverViewLayer extends InteractionLayer {
 		this.#mirrors.keepUp();
 	}
 
-	/** To be called at once when a wall was added, changed or removed. */
+	/** To be called at once when a wall or a region was added, changed or removed. */
 	wallsChanged() {
+		this.#obstacles.changed();
 		this.#mirrors.wallsChanged();
 	}
 
@@ -434,29 +464,108 @@ export class CoverViewLayer extends InteractionLayer {
 	}
 
 	/**
-	 * True when one token has a line of sight to another by way of mirrors: from its middle to
-	 * the middle of the other, or to one of four places half way out to the other's corners.
+	 * Where one token looks from and the places of another it looks at, each `{ x, y, z }` with z
+	 * the height in scene pixels: the middle of the other and four places half way out to its
+	 * corners, each near its head and at half its height.
+	 * @returns {{from: object, places: object[]}|null} null where a token has no place
+	 */
+	#looks(observer, target) {
+		const from = observer?.center;
+		const to = target?.center;
+		if (!from || !to) return null;
+		const w = (target.w ?? 0) / 4;
+		const h = (target.h ?? 0) / 4;
+		const body = tokenHeights(target);
+		const places = [];
+		for (const share of [0.9, 0.5]) {
+			const z = body.bottom + (body.top - body.bottom) * share;
+			places.push({ x: to.x, y: to.y, z }, { x: to.x - w, y: to.y - h, z }, { x: to.x + w, y: to.y - h, z }, { x: to.x + w, y: to.y + h, z }, { x: to.x - w, y: to.y + h, z });
+		}
+		return { from: { x: from.x, y: from.y, z: tokenHeights(observer).eye }, places };
+	}
+
+	/**
+	 * True when one token has a line of sight to another by way of mirrors: from where it looks
+	 * from to one of the places of the other `#looks` names.
 	 * @param {Token} observer
 	 * @param {Token} target
 	 */
 	seesByMirrors(observer, target) {
-		const from = observer?.center;
-		const to = target?.center;
-		if (!from || !to) return false;
-		const w = (target.w ?? 0) / 4;
-		const h = (target.h ?? 0) / 4;
-		return this.#mirrors.seesBetween(from, [to, { x: to.x - w, y: to.y - h }, { x: to.x + w, y: to.y - h },
-			{ x: to.x + w, y: to.y + h }, { x: to.x - w, y: to.y + h }]);
+		const looks = this.#looks(observer, target);
+		return looks ? this.#mirrors.seesBetween(looks.from, looks.places) : false;
 	}
 
 	/**
-	 * How much of a token the walls that stop movement hide: the cover test of the script, as
-	 * the view shows it for the selected token. The token looked at is a circle, as wide as the
-	 * token unless a diameter is set for all targets. With `source`, the token looked from, the
-	 * look is from the places across that token the setting `points` asks for, and the answer is
-	 * that of the place with the best view; without, it is from the one place `from`. Answers
-	 * are kept while the walls stay as they are.
-	 * @param {{x: number, y: number}} from where the looking token's middle is
+	 * True when one token has a straight line of sight to another through the room: no wall
+	 * stands in it at the height the line has there, and no floor or roof lies across it. A
+	 * token sees a taller one over a wall this way, which no flat view can show.
+	 * @param {Token} observer
+	 * @param {Token} target
+	 */
+	seesOver(observer, target) {
+		const looks = this.#looks(observer, target);
+		if (!looks) return false;
+		try {
+			return looks.places.some((place) => this.#obstacles.clear(looks.from, place));
+		} catch (error) {
+			console.error(error);
+			return false;
+		}
+	}
+
+	/**
+	 * True when a token that sees has a straight line of sight through the room to a token
+	 * Foundry found hidden; the arguments are those of CanvasVisibility#testVisibility. Foundry
+	 * decides by the flat view of each token that sees, which a wall cuts off whatever stands
+	 * behind it. Here the token's sight and its light perception are asked again (the detection
+	 * modes of CONFIG.Canvas.detectionModes, so a system's own rules hold): what each says of
+	 * the two tokens themselves, of the range and of the angle, and in place of the flat view
+	 * the line from where the seeing token looks from to the other. Light perception also wants
+	 * the other to stand in light. On a scene without heights the flat view is all there is, and
+	 * this says no.
+	 */
+	seenOver(points, options) {
+		const object = options?.object;
+		if (object?.document?.documentName !== 'Token') return false;
+		try {
+			if (this.#obstacles.flat) return false;
+			const modes = CONFIG.Canvas.detectionModes;
+			const level = canvas.scene?.levels?.get?.(object.document.level) ?? canvas.level;
+			const per = perUnit();
+			for (const source of canvas.effects?.visionSources ?? []) {
+				const seer = source.object;
+				if (!source.active || source.mirrored || source.isBlinded || !seer?.document || seer === object) continue;
+				const looks = this.#looks(seer, object);
+				if (!looks) continue;
+				for (const id of ['basicSight', 'lightPerception']) {
+					const mode = seer.document.detectionModes?.[id];
+					const asked = modes?.[id];
+					if (!mode?.enabled || !asked || asked._canDetect?.(source, object, level) === false) continue;
+					for (const place of looks.places) {
+						const test = { point: { x: place.x, y: place.y, elevation: place.z / per }, level, los: new Map() };
+						if (asked._testRange?.(source, mode, object, test) === false || asked._testAngle?.(source, mode, object, test) === false) continue;
+						if (id === 'lightPerception' && !canvas.effects.testInsideLight(test.point)) continue;
+						if (this.#obstacles.clear(looks.from, place)) return true;
+					}
+				}
+			}
+		} catch (error) {
+			if (!this.#sightFailed) console.error('cover-quadtree-view: looking over walls failed', error);
+			this.#sightFailed = true;
+		}
+		return false;
+	}
+
+	/**
+	 * How much of a token the walls and surfaces that stop movement hide: the cover test of the
+	 * script, as the view shows it for the selected token. The token looked at is a circle, as
+	 * wide as the token unless a diameter is set for all targets, that stands from the token's
+	 * feet to its head. With `source`, the token looked from, the look is from the places across
+	 * that token the setting `points` asks for, at the height that token looks from, and the
+	 * answer is that of the place with the best view; without, it is from the one place `from`,
+	 * at the elevation it names, or else level with the head of the token looked at. Answers are
+	 * kept while the walls stay as they are.
+	 * @param {{x: number, y: number, elevation?: number}} from where the looking token's middle is
 	 * @param {Token} token the token looked at
 	 * @param {Token} [source] the token looked from
 	 * @returns {number|null} the hidden share, 0 to 1; null while there is no answer to give
@@ -469,13 +578,15 @@ export class CoverViewLayer extends InteractionLayer {
 		// as `#readTokens` sets the selected token up: a circle as wide as the token, at whole places
 		const across = source ? (value('sourceDiameter') > 0 ? value('sourceDiameter') : Math.min(source.w ?? 0, source.h ?? 0) || 0) : 0;
 		const points = across > 0 ? value('points') : 1;
-		const s = [Math.round(from.x), Math.round(from.y), 0];
-		const t = [Math.round(centre.x), Math.round(centre.y), 0];
-		const key = [s[0], s[1], t[0], t[1], diameter, across, points].join();
+		const body = tokenHeights(token);
+		const eye = source ? tokenHeights(source).eye : (Number.isFinite(from.elevation) ? from.elevation * perUnit() : body.top);
+		const s = [Math.round(from.x), Math.round(from.y), Math.round(eye)];
+		const t = [Math.round(centre.x), Math.round(centre.y), Math.round(body.bottom), Math.round(body.top)];
+		const key = [...s, ...t, diameter, across, points, value('heights')].join();
 		if (!this.#shares.has(key)) {
 			let share = null;
 			try {
-				share = this.#cover.testCover(this.#treeJson, s, [t], across, diameter, points)[0]?.obstructed ?? null;
+				share = this.#cover.testCover(this.#treeJson, s, [t], across, diameter, points, value('heights'))[0]?.obstructed ?? null;
 			} catch (error) {
 				console.error(error);
 			}
@@ -614,7 +725,9 @@ export class CoverViewLayer extends InteractionLayer {
 				for (const q of result.points) {
 					parts.cover.lineStyle(0);
 					for (const run of q.runs) {
-						parts.cover.beginFill(run.blocked ? BLOCKED : LIGHT, run.blocked ? 0.4 : 0.25)
+						// from free to hidden, by how much of the target's height is hidden in this run
+						const share = run.share ?? (run.blocked ? 1 : 0);
+						parts.cover.beginFill(between(LIGHT, BLOCKED, share), 0.25 + 0.15 * share)
 							.drawPolygon([q.at.x, q.at.y, run.from.x, run.from.y, run.to.x, run.to.y]).endFill();
 					}
 					if (q.rays) {
@@ -847,8 +960,8 @@ export class CoverViewLayer extends InteractionLayer {
 		// the viewpoints behind mirrors are made anew as after a change of walls
 		if (key === 'mirrorChain') this.#mirrors.wallsChanged();
 		// PF2E Visioner goes by all of these where it is hooked in
-		if (['lights', 'litLevel', 'mirrorChain', 'points', 'sourceDiameter', 'targetDiameter', 'visionerLight', 'visionerSight', 'visionerCover'].includes(key)) refreshVisioner();
-		if (['cover', 'points', 'sourceDiameter', 'targetDiameter'].includes(key)) this.#readTokens(true);
+		if (['lights', 'litLevel', 'mirrorChain', 'points', 'heights', 'sourceDiameter', 'targetDiameter', 'visionerLight', 'visionerSight', 'visionerCover'].includes(key)) refreshVisioner();
+		if (['cover', 'points', 'heights', 'sourceDiameter', 'targetDiameter'].includes(key)) this.#readTokens(true);
 		this.#redraw();
 	}
 

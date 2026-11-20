@@ -3,6 +3,7 @@
 // data in common/documents/wall.d.mts, Edge in client/canvas/geometry/edges/edge.d.mts and the
 // values in common/constants.d.mts.
 
+import { wallHeights } from './heights.mjs';
 import { MODULE_ID, SURFACE } from './settings.mjs';
 
 /**
@@ -24,6 +25,9 @@ import { MODULE_ID, SURFACE } from './settings.mjs';
  * @property {number} smoothnessLeft  how sharp that face mirrors, 0 to 1
  * @property {number} metallicRight   the same two for its right face
  * @property {number} smoothnessRight
+ * @property {number} bottom  the height the wall stands from, in scene pixels; -Infinity when
+ *   it names none (see heights.mjs)
+ * @property {number} top     the height it stands up to; Infinity when it names none
  */
 
 /**
@@ -55,7 +59,7 @@ export function wallEffect(document) {
 		const { light = 0, sight = 0, sound = 0, attenuation = false } = edge.threshold ?? {};
 		return { move: edge.move, light: edge.light, sight: edge.sight, sound: edge.sound, dir: edge.direction,
 			lightThreshold: light || 0, sightThreshold: sight || 0, soundThreshold: sound || 0, attenuation: attenuation ? 1 : 0,
-			...wallSurface(document) };
+			...wallSurface(document), ...wallHeights(document) };
 	}
 	// A wall without an Edge (its scene has not set up its edges yet) is read the way
 	// WallDocument makes the Edge.
@@ -74,6 +78,7 @@ export function wallEffect(document) {
 		soundThreshold: (threshold.sound || 0) * pixels,
 		attenuation: threshold.attenuation ? 1 : 0,
 		...wallSurface(document),
+		...wallHeights(document),
 	};
 }
 
@@ -82,13 +87,16 @@ export function wallEffect(document) {
  * `root` saying which of them is the root. A node has its `bounds`, the `objects` stored in it
  * and the places of its child `nodes` in the list. An object is one wall: `t` holds its two
  * ends `a` and `b`, `r` its bounding box, `n` the number of nodes that store it, and `w` how
- * it acts (a {@link WallEffect}).
+ * it acts (a {@link WallEffect}; a bottom or a top the wall does not name is left out, which
+ * the script reads as "as far as the map goes"). With the tree go the flat surfaces of the
+ * scene, in `surfaces`.
  *
  * @param {foundry.canvas.geometry.Quadtree} quadtree a quadtree whose objects are walls (Wall
  *   placeables, as in `canvas.walls.quadtree`)
+ * @param {object[]} [surfaces] the flat surfaces, as `surfaceList` of heights.mjs gives them
  * @returns {string}
  */
-export function quadtreeJson(quadtree) {
+export function quadtreeJson(quadtree, surfaces = []) {
 	const nodes = [];
 	// The script reads every value as a whole number, so a box is rounded outwards: it may
 	// get larger by less than a unit, never smaller.
@@ -100,7 +108,13 @@ export function quadtreeJson(quadtree) {
 	// a wall is stored in every node it touches; how it acts is worked out once
 	const effects = new Map();
 	const effectOf = (wall) => {
-		if (!effects.has(wall)) effects.set(wall, wallEffect(wall.document));
+		if (!effects.has(wall)) {
+			// JSON has no way to write "without end"
+			const { bottom, top, ...effect } = wallEffect(wall.document);
+			if (Number.isFinite(bottom)) effect.bottom = bottom;
+			if (Number.isFinite(top)) effect.top = top;
+			effects.set(wall, effect);
+		}
 		return effects.get(wall);
 	};
 	const add = (node) => {
@@ -116,5 +130,5 @@ export function quadtreeJson(quadtree) {
 		return nodes.length - 1;
 	};
 	const root = add(quadtree);
-	return JSON.stringify({ root, nodes });
+	return JSON.stringify({ root, nodes, surfaces });
 }

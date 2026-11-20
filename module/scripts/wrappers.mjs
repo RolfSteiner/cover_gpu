@@ -9,7 +9,8 @@
 //    traced light counts as lit. The light perception of tokens goes by it.
 //  - CanvasVisibility#testVisibility, "can this place, or this token, be seen": also yes when a
 //    token sees it in a mirror (see mirrors.mjs for why Foundry does not always find that out
-//    by itself).
+//    by itself), and when a token sees another over or under the walls between them (see
+//    sight.mjs: Foundry's views are flat shapes, which a wall cuts off whatever stands behind it).
 //
 // PF2E Visioner (github.com/roileaf/pf2e-visioner), where it is active. Visioner works out, for
 // every pair of tokens, how well the one perceives the other and what cover it has from it,
@@ -18,7 +19,7 @@
 //    darker than the path traced light makes the place. Magical darkness and a level set by a
 //    rule element stay as Visioner has them.
 //  - VisionAnalyzer#hasLineOfSight, whether one token has a line of sight to another: also yes
-//    when it has one by way of mirrors.
+//    when it has one over or under the walls between them, or by way of mirrors.
 //  - CoverDetector#_estimateWallCoveragePercent, how much of a target walls hide from a place,
 //    which Visioner turns into no, standard or greater cover by its own thresholds: the answer
 //    of this module's cover test (the walls that stop movement, see layer.mjs). This is the one
@@ -86,7 +87,8 @@ export function wrapFoundry() {
 	});
 	wrap('CONFIG.Canvas.groups.visibility.groupClass.prototype.testVisibility', function (wrapped, points, options = {}) {
 		if (wrapped(points, options)) return true;
-		return layer()?.seenInMirrors(this, points, options) ?? false;
+		const view = layer();
+		return Boolean(view && (view.seenInMirrors(this, points, options) || view.seenOver(points, options)));
 	});
 }
 
@@ -123,7 +125,8 @@ export async function wrapVisioner() {
 		const seen = wrapped(observer, target);
 		// `undefined` is Visioner's "lines of sight are switched off"
 		if (seen !== false || !value('visionerSight')) return seen;
-		return layer()?.seesByMirrors(observer, target) ? true : seen;
+		const view = layer();
+		return view && (view.seesOver(observer, target) || view.seesByMirrors(observer, target)) ? true : seen;
 	})) hooked.push('sight');
 
 	// the attackers Visioner is working on, innermost last

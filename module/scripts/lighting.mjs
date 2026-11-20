@@ -21,6 +21,12 @@
 // scene's global light, darkness sources, what tokens with vision add, the masking of what a
 // token cannot see, fog of war, and what the pf2e system changes for darkvision.
 //
+// The light is traced through a scene that has height (see heights.mjs). The picture shows the
+// light on the floor of the viewed level. Each source is at its own height, a wall stops light
+// between its bottom and its top, and the surfaces of regions that stop light are floors and
+// roofs to it: light from a source above a low wall falls over it, and the wall's shadow on
+// the floor is as long as that makes it.
+//
 // What a token can see goes by where there is light, and Foundry knows that from the shapes of
 // its light sources, which hold the light that comes straight from a source only. The light the
 // walls throw back is added to it in the two places Foundry asks:
@@ -38,6 +44,7 @@
 // client/canvas/layers/effects/illumination-effects.d.mts, PointLightSource and its data in
 // client/canvas/sources.
 
+import { floorHeight, lightHeight } from './heights.mjs';
 import { value } from './settings.mjs';
 
 /** The layers of canvas.effects a light source has a mesh in. */
@@ -142,8 +149,8 @@ export class PathTracedLighting {
 	}
 
 	/**
-	 * True when the traced light at a place of the scene counts as lit. False while there is no
-	 * picture.
+	 * True when the traced light at a place of the scene counts as lit: the light on the floor
+	 * there, whatever the height of what stands on it. False while there is no picture.
 	 * @param {{x: number, y: number}} point
 	 */
 	isLit(point) {
@@ -217,7 +224,7 @@ export class PathTracedLighting {
 		// the opacity of a light's color says how much of the color its light has
 		const strength = Math.min(Math.max(data.alpha ?? 0.5, 0), 1);
 		const color = source.colorRGB ? Array.from(source.colorRGB, (c) => 1 + (c - 1) * strength) : [1, 1, 1];
-		return { x: data.x, y: data.y, radius: data.radius, bright: Math.min(Math.abs(data.bright ?? 0), data.radius), color,
+		return { x: data.x, y: data.y, z: Math.round(lightHeight(source) * 100) / 100, radius: data.radius, bright: Math.min(Math.abs(data.bright ?? 0), data.radius), color,
 			walls: data.walls !== false, angle: data.angle ?? 360, rotation: data.rotation ?? 0, attenuation: data.attenuation ?? 0.5,
 			externalRadius: data.externalRadius ?? 0,
 			// an animated source keeps its own meshes for the light that comes straight from it
@@ -239,7 +246,7 @@ export class PathTracedLighting {
 		const width = value('pictureWidth');
 		const picture = { width, height: Math.max(1, Math.round((width * this.#root.height) / this.#root.width)),
 			samples: value('samples'), bounces: value('bounces'), smoothing: value('smoothing'),
-			wallHeight: value('wallHeight') * (canvas.dimensions?.size ?? 100), antialias: value('antialias') };
+			wallHeight: value('wallHeight') * (canvas.dimensions?.size ?? 100), antialias: value('antialias'), floor: floorHeight() };
 		const inputs = sources ? JSON.stringify([sources, picture, value('litLevel')]) : '';
 		if (!anyway && inputs === this.#inputs) return false;
 		this.#inputs = inputs;

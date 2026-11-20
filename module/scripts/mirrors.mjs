@@ -48,17 +48,24 @@
 // needs no views: the place looked from is mirrored at each mirror of a row in turn, which
 // gives the one way the line of sight can take by those mirrors, and that way is followed.
 //
+// The scene has height (see heights.mjs), and a mirror is as high as its wall. A view is a flat
+// shape, as all of Foundry's are, so it is worked out level, at the height the token looks
+// from: with the walls that stand at that height, of which those with a mirroring face are its
+// mirrors. This is how Wall Height has Foundry work out the token's own view. A single line of
+// sight is followed through the room (`sightBetween`): a mirror stands upright, so the line
+// climbs or falls evenly along its whole way by the mirrors, it has to meet each mirror between
+// the mirror's bottom and its top, and it passes over and under walls as any line of sight
+// does (see sight.mjs).
+//
 // The Foundry types named here are the ones of the pf2e system's declarations
 // (github.com/foundryvtt/pf2e, types/foundry): PointVisionSource in
 // client/canvas/sources/point-vision-source.d.mts, CanvasVisibility in
 // client/canvas/groups/visibility.d.mts, PointSourcePolygon in
 // client/canvas/geometry/shapes/source-polygon.d.mts.
 
+import { tokenHeights } from './heights.mjs';
 import { value } from './settings.mjs';
-import { wallEffect, wallSurface } from './quadtree.mjs';
-
-/** A face counts as a mirror from this much metallic and smoothness on. */
-const MIRROR = 0.99;
+import { stopped } from './sight.mjs';
 
 /** A mirror is looked at for being seen at one place every this many scene pixels along it. */
 const STEP = 20;
@@ -98,7 +105,8 @@ const cross = (ax, ay, bx, by) => ax * by - ay * bx;
  * @param {{x: number, y: number}} behind where the lines start: the seer's place mirrored at the wall
  * @param {{x: number, y: number}} a one end of the part of the mirror
  * @param {{x: number, y: number}} b its other end
- * @param {object[]} walls `{ id, ax, ay, bx, by, sight, dir, threshold }`, the mirror among them
+ * @param {object[]} walls `{ id, ax, ay, bx, by, sight, dir, threshold }`, the mirror among them:
+ *   the walls that stand at the height the view is worked out at
  * @param {string} mirrorId the wall the mirror is on, which does not stop its own view
  * @param {number} reach how far a line is followed at most
  * @returns {number[]|null} the corners of the outline, x and y in turn; null when there is none
@@ -198,47 +206,21 @@ export function viewThrough(behind, a, b, walls, mirrorId, reach) {
  * mirrored at each mirror of the row in turn, lies in a straight line with the place looked at
  * and with the point of the last mirror the line of sight comes off; from there back, each
  * point on a mirror lies in a line with the mirrored place of the mirrors before it. The way is
- * good when each of those points is on its mirror, on a face that mirrors, and no wall stops
- * sight on any stretch of it.
+ * good when each of those points is on its mirror, on a face that mirrors and between the
+ * mirror's bottom and its top, and nothing stops sight on any stretch of it. Along the way the
+ * line climbs or falls evenly from the height it starts at to the height it ends at.
  *
- * @param {{x: number, y: number}} from the place looked from
- * @param {{x: number, y: number}} to the place looked at
- * @param {object[]} walls as `viewThrough` takes them, with `left` and `right` telling which
- *   faces mirror
+ * @param {{x: number, y: number, z: number}} from the place looked from, z being its height
+ * @param {{x: number, y: number, z: number}} to the place looked at
+ * @param {object[]} walls as `stopped` of sight.mjs takes them, with `left` and `right` telling
+ *   which faces mirror
  * @param {number} chain the most mirrors in a row
+ * @param {object[]} [surfaces] the flat surfaces that stop sight, as `stopped` takes them
  * @returns {boolean}
  */
-export function sightBetween(from, to, walls, chain) {
+export function sightBetween(from, to, walls, chain, surfaces = []) {
 	const mirrors = walls.filter((wall) => wall.sight && (wall.left || wall.right));
 	if (!mirrors.length) return false;
-
-	// true when a wall stops sight on the straight stretch from p to q; the mirrors the stretch
-	// starts and ends on are not in its way
-	const stopped = (p, q, ends) => {
-		const dx = q.x - p.x;
-		const dy = q.y - p.y;
-		let limited = 0;
-		for (const wall of walls) {
-			if (!wall.sight || ends.includes(wall.id)) continue;
-			const wx = wall.bx - wall.ax;
-			const wy = wall.by - wall.ay;
-			const den = cross(dx, dy, wx, wy);
-			if (den === 0) continue;
-			const t = cross(wall.ax - p.x, wall.ay - p.y, wx, wy) / den;
-			if (t <= 1e-6 || t >= 1 - 1e-6) continue;
-			const s = cross(wall.ax - p.x, wall.ay - p.y, dx, dy) / den;
-			if (s < 0 || s > 1) continue;
-			const side = (wall.ay - p.y) * (wall.bx - p.x) - (wall.ax - p.x) * (wall.by - p.y);
-			if (wall.dir && wall.dir === (side < 0 ? 1 : 2)) continue;
-			if (wall.sight >= PROXIMITY && wall.threshold > 0) {
-				const along = Math.min(1, Math.max(0, ((p.x - wall.ax) * wx + (p.y - wall.ay) * wy) / (wx * wx + wy * wy || 1)));
-				const apart = Math.hypot(p.x - wall.ax - wx * along, p.y - wall.ay - wy * along);
-				if (wall.sight === PROXIMITY ? apart < wall.threshold : apart > wall.threshold) continue;
-			}
-			if (wall.sight !== LIMITED || ++limited > 1) return true;
-		}
-		return false;
-	};
 
 	// the way by a row of mirrors, given the mirrored places: found from its end, then followed
 	const good = (row) => {
@@ -258,12 +240,20 @@ export function sightBetween(from, to, walls, chain) {
 			goal = { x: image.x + dx * t, y: image.y + dy * t };
 			points.unshift(goal);
 		}
-		let at = from;
-		for (let i = 0; i < points.length; i++) {
-			if (stopped(at, points[i], [row[i].mirror.id, row[i - 1]?.mirror.id])) return false;
-			at = points[i];
+		// how high the line is at each turn: by how much of the way lies behind it
+		const turns = [from, ...points, to];
+		const behind = [0];
+		for (let i = 1; i < turns.length; i++) behind.push(behind[i - 1] + Math.hypot(turns[i].x - turns[i - 1].x, turns[i].y - turns[i - 1].y));
+		const whole = behind[behind.length - 1] || 1;
+		const way = turns.map((turn, i) => ({ x: turn.x, y: turn.y, z: from.z + ((to.z - from.z) * behind[i]) / whole }));
+		for (let i = 0; i < row.length; i++) {
+			if (way[i + 1].z < row[i].mirror.bottom || way[i + 1].z > row[i].mirror.top) return false;
 		}
-		return !stopped(at, to, [row[row.length - 1].mirror.id]);
+		// the mirrors a stretch starts and ends on are not in its way
+		for (let i = 0; i + 1 < way.length; i++) {
+			if (stopped(way[i], way[i + 1], walls, surfaces, [row[i - 1]?.mirror.id, row[i]?.mirror.id])) return false;
+		}
+		return true;
 	};
 
 	let tried = 0;
@@ -321,17 +311,18 @@ function mirroredClass(Base) {
 }
 
 export class MirrorVision {
+	/** @param {Obstacles} obstacles the walls and surfaces of the scene (sight.mjs) */
+	constructor(obstacles) {
+		this.#obstacles = obstacles;
+	}
+
+	#obstacles;
+
 	/** The mirrored viewpoints in use, by a key of token, walls and parts of the walls: `{ source }`. */
 	#views = new Map();
 
 	/** What the viewpoints of a token's vision source were made from, by the id of that source. */
 	#made = new Map();
-
-	/** Counts the changes of walls: a viewpoint is made anew when this has moved on. */
-	#walls = 0;
-
-	/** The walls as `#wallList` gave them, and the count of wall changes they were read at. */
-	#read = null;
 
 	/** True once a failure was reported, so that one that repeats every frame is reported once. */
 	#failed = false;
@@ -341,9 +332,8 @@ export class MirrorVision {
 		return this.#views.size;
 	}
 
-	/** To be called when a wall was added, changed or removed. */
+	/** To be called when a wall or a surface was added, changed or removed, after the obstacles were told. */
 	wallsChanged() {
-		this.#walls++;
 		if (canvas.ready) canvas.perception?.update({ refreshVision: true });
 	}
 
@@ -368,21 +358,20 @@ export class MirrorVision {
 		for (const { source } of this.#views.values()) source.destroy?.();
 		this.#views = new Map();
 		this.#made = new Map();
-		this.#read = null;
 	}
 
 	/**
 	 * True when sight gets from one place to one of some others by way of mirrors. Mirrors
 	 * count while the light is path traced, as they do for what tokens see.
-	 * @param {{x: number, y: number}} from
-	 * @param {{x: number, y: number}[]} places
+	 * @param {{x: number, y: number, z: number}} from z being the height, in scene pixels
+	 * @param {{x: number, y: number, z: number}[]} places
 	 */
 	seesBetween(from, places) {
 		if (!value('lights') || !canvas.walls) return false;
 		try {
-			if (this.#read?.at !== this.#walls) this.#read = { at: this.#walls, walls: this.#wallList() };
+			const { walls, surfaces } = this.#obstacles;
 			const chain = value('mirrorChain');
-			return places.some((to) => sightBetween(from, to, this.#read.walls, chain));
+			return places.some((to) => sightBetween(from, to, walls, chain, surfaces));
 		} catch (error) {
 			this.#report(error);
 			return false;
@@ -393,33 +382,6 @@ export class MirrorVision {
 		if (this.#failed) return;
 		this.#failed = true;
 		console.error('cover-quadtree-view: looking into mirrors failed', error);
-	}
-
-	/**
-	 * The walls of the viewed level as a view meets them: `{ id, ax, ay, bx, by, sight, dir,
-	 * threshold, left, right }`, where `sight`, `dir` and `threshold` are what Foundry's Edge of
-	 * the wall says of sight and `left` and `right` tell which of its faces mirror. The four
-	 * sides of the canvas end every view, as they end Foundry's.
-	 */
-	#wallList() {
-		const walls = [];
-		for (const wall of canvas.walls?.placeables ?? []) {
-			const document = wall.document;
-			const [ax, ay, bx, by] = document.c;
-			if (ax === bx && ay === by) continue;
-			const effect = wallEffect(document);
-			const surface = wallSurface(document);
-			walls.push({ id: document.id, ax, ay, bx, by, sight: effect.sight, dir: effect.dir, threshold: effect.sightThreshold,
-				left: surface.metallicLeft >= MIRROR && surface.smoothnessLeft >= MIRROR,
-				right: surface.metallicRight >= MIRROR && surface.smoothnessRight >= MIRROR });
-		}
-		const { x, y, width, height } = canvas.dimensions.rect;
-		const corners = [[x, y], [x + width, y], [x + width, y + height], [x, y + height]];
-		corners.forEach(([ax, ay], i) => {
-			const [bx, by] = corners[(i + 1) % 4];
-			walls.push({ id: `canvas side ${i}`, ax, ay, bx, by, sight: 20, dir: 0, threshold: 0, left: false, right: false });
-		});
-		return walls;
 	}
 
 	/**
@@ -500,12 +462,14 @@ export class MirrorVision {
 		let changed = false;
 		// the viewpoints are among the vision sources themselves, and are not tokens' own
 		const reals = value('lights') ? [...(canvas.effects?.visionSources ?? [])].filter((source) => !source.mirrored) : [];
-		const walls = reals.length ? this.#wallList() : [];
-		const mirrors = walls.filter((wall) => wall.sight && (wall.left || wall.right));
+		const all = reals.length ? this.#obstacles.walls : [];
+		const anyMirror = all.some((wall) => wall.sight && (wall.left || wall.right));
 		const chain = value('mirrorChain');
-		for (const real of mirrors.length ? reals : []) {
+		for (const real of anyMirror ? reals : []) {
 			if (!real.active || real.isBlinded || !real.los || !real.object) continue;
-			const stamp = `${real.updateId}|${this.#walls}|${chain}`;
+			// the view is worked out level, at the height the token looks from
+			const eye = tokenHeights(real.object).eye;
+			const stamp = `${real.updateId}|${this.#obstacles.count}|${chain}|${eye}`;
 			const before = this.#made.get(real.sourceId);
 			if (before?.stamp === stamp) {
 				// nothing has changed for this source: its viewpoints stay as they are
@@ -514,6 +478,8 @@ export class MirrorVision {
 				continue;
 			}
 			changed = true;
+			const walls = all.filter((wall) => eye >= wall.bottom && eye <= wall.top);
+			const mirrors = walls.filter((wall) => wall.sight && (wall.left || wall.right));
 			const keys = [];
 			// the viewpoints of everything `seer` sees mirrored, and of what those see, `row` mirrors deep
 			const look = (seer, name, row, through) => {

@@ -5,9 +5,9 @@
 		"SettingsTitle": "Quadtree View settings",
 		"Tool": {
 			"move": "Move: no tool. Rays can be dragged with any tool and under any controls; right-click one to remove it",
-			"ray": "Ray: drag on the map to place a ray",
+			"ray": "Ray: drag on the map to place a ray. It lies level on the floor of the scene and meets the walls that stand there",
 			"show": "Show the view, also while other controls are active",
-			"cover": "Cover test: how much of every other token the walls that stop movement hide from the selected token",
+			"cover": "Cover test: how much of every other token the walls and floors that stop movement hide from the selected token, by the heights of the walls and of the tokens",
 			"lights": "Path trace the light of the scene's light sources, for every user, in place of Foundry's own light. Places the reflected light reaches count as lit for what tokens see",
 			"cells": "Show the quadtree cells and the bounding boxes of the walls",
 			"settings": "Settings",
@@ -28,19 +28,19 @@
 			},
 			"bounces": {
 				"Name": "Bounces",
-				"Hint": "How many walls a path may bounce off (0 to 16). 0 shows direct light only."
+				"Hint": "How many walls, floors or roofs a path may bounce off (0 to 16). 0 shows direct light only."
 			},
 			"smoothing": {
 				"Name": "Smoothing",
-				"Hint": "How many times the light that walls throw back is smoothed to take the grain of path tracing out of it (0 to 6). Each time reaches twice as far; 0 leaves the grain in. Light is never smoothed through a wall."
+				"Hint": "How many times the light that walls throw back is smoothed to take the grain of path tracing out of it (0 to 6). Each time reaches twice as far; 0 leaves the grain in. Light is never smoothed through a wall that stands on the floor."
 			},
 			"antialias": {
 				"Name": "Edge smoothing",
 				"Hint": "At how many places of the side of each pixel the light that comes straight from a source is taken (1 to 4). 1 leaves the edges of shadows and of lights in steps; 4 takes sixteen places per pixel and smooths them."
 			},
 			"wallHeight": {
-				"Name": "Wall height",
-				"Hint": "How high the walls stand, in grid squares (0 to 100). It sets how far the light that walls throw back carries: a half is left one wall height from the wall, a fifth two heights away. 0 lets it carry across the whole scene. Set for the world, by a GM."
+				"Name": "Height of walls without a top",
+				"Hint": "Up to how many grid squares above the floor a wall that names no top throws light back (0 to 100). Such a wall is lit as high up as a light carries and would throw all of that back onto the floor; a lower number keeps the reflected light nearer to the wall. 0 lets such walls throw light back as high as they are lit. A wall with a Wall Height (Top) goes by that instead. Set for the world, by a GM."
 			},
 			"litLevel": {
 				"Name": "Counts as lit from",
@@ -56,7 +56,11 @@
 			},
 			"points": {
 				"Name": "Cover test: points n",
-				"Hint": "How many points across the source the cover test looks from (1 to 200)."
+				"Hint": "How many points across the source the cover test looks from (1 to 200), all at the height the token looks from."
+			},
+			"heights": {
+				"Name": "Cover test: heights",
+				"Hint": "At how many heights the cover test looks at each token, spread evenly from its feet to its head (1 to 24). 1 looks at the middle of the token only. With more, a wall that ends below the line of sight, or begins above it, hides the part of the token it really hides."
 			},
 			"sourceDiameter": {
 				"Name": "Cover test: source diameter",
@@ -72,11 +76,11 @@
 			},
 			"visionerSight": {
 				"Name": "PF2E Visioner: lines of sight",
-				"Hint": "Where PF2E Visioner is active, a token also has a line of sight to another when it sees it by way of mirrors (while the light is path traced)."
+				"Hint": "Where PF2E Visioner is active, a token also has a line of sight to another when it sees it over or under the walls between them, by the heights of the walls and of the two tokens, or by way of mirrors (mirrors count while the light is path traced)."
 			},
 			"visionerCover": {
 				"Name": "PF2E Visioner: cover from walls",
-				"Hint": "Where PF2E Visioner is active, how much of a target walls hide is worked out by this module: the share the walls that stop movement hide of the target, as the view shows it for the selected token (looked at from across the attacker, from the place with the best view). Visioner turns the share into cover by its own thresholds, and still adds cover from creatures and its own overrides."
+				"Hint": "Where PF2E Visioner is active, how much of a target walls hide is worked out by this module: the share the walls and floors that stop movement hide of the target from its feet to its head, as the view shows it for the selected token (looked at from across the attacker, at the height it looks from, from the place with the best view). Visioner turns the share into cover by its own thresholds, and still adds cover from creatures and its own overrides."
 			}
 		},
 		"Wall": {
