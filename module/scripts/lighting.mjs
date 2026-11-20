@@ -25,7 +25,16 @@
 // light on the floor that is at each place: on a surface of a region that stops movement, where
 // one lies within the viewed level (a raised floor, the roof of a lower room), and on the
 // ground elsewhere. A lamp that stands on such a floor lights that floor, and of the ground
-// beside it only what its light reaches down there. Each source is at its own height, a wall stops light
+// beside it only what its light reaches down there.
+//
+// The light of the whole scene is traced, whichever of its levels is viewed. Foundry sets up a
+// light source only for a light, or a token, that is part of the viewed level, and draws no
+// other. But light does not stop at a level: a lamp of the floor above shines down where no
+// floor is in its way, and the lamps of the ground are what lights the ground one looks down
+// on from above. So the lights and the tokens with a light that Foundry has not set up are read
+// from the scene (`#elsewhere`), and all the scene's walls and surfaces are in the way of the
+// light (see layer.mjs, `refreshTree`). A light that Foundry has not set up has no meshes
+// either, and so no animation: all of its light is in the picture. Each source is at its own height, a wall stops light
 // between its bottom and its top, and the surfaces of regions that stop light are floors and
 // roofs to it: light from a source above a low wall falls over it, and the wall's shadow on
 // the floor is as long as that makes it.
@@ -47,7 +56,7 @@
 // client/canvas/layers/effects/illumination-effects.d.mts, PointLightSource and its data in
 // client/canvas/sources.
 
-import { lightHeight, viewedFloors } from './heights.mjs';
+import { lightHeight, perUnit, tokenHeights, viewedFloors } from './heights.mjs';
 import { value } from './settings.mjs';
 
 /** The layers of canvas.effects a light source has a mesh in. */
@@ -205,20 +214,57 @@ export class PathTracedLighting {
 	}
 
 	/**
-	 * The point light sources Foundry lights the viewed level with: ambient lights and the lights
-	 * tokens carry (PointLightSource). The scene's global light has no place or reach, and is
-	 * left to Foundry.
+	 * The point light sources Foundry has set up: those of the ambient lights and of the tokens
+	 * that are part of the viewed level (PointLightSource). The scene's global light has no
+	 * place or reach, and is left to Foundry.
 	 * @returns {PointLightSource[]}
 	 */
 	#sources() {
 		const sources = [];
 		for (const source of canvas.effects?.lightSources ?? []) {
 			if (!source.active || !(source.data.radius > 0)) continue;
-			// the walls are those of the viewed level, so a light of another level is left out
-			if (source.level?.isView === false) continue;
 			sources.push(source);
 		}
 		return sources;
+	}
+
+	/**
+	 * The lights of the scene Foundry has set up no source for, because they are not part of
+	 * the viewed level, as the script takes them: ambient lights, and the lights tokens carry.
+	 * A light is left out when it is hidden, when it is a source of darkness, and while the
+	 * darkness of the scene is outside the range the light is switched on for.
+	 * @returns {object[]}
+	 */
+	#elsewhere() {
+		const scene = canvas.scene;
+		const per = perUnit();
+		const darkness = canvas.environment?.darknessLevel ?? canvas.darknessLevel ?? 0;
+		const dimLevel = canvas.environment?.weights?.dim ?? CONFIG.Canvas.lightLevels?.dim ?? 0.25;
+		const lights = [];
+		// what an AmbientLightDocument has in `config` and a TokenDocument in `light`
+		const add = (config, at, more) => {
+			const radius = Math.max(Math.abs(config?.dim ?? 0), Math.abs(config?.bright ?? 0)) * per + (more.externalRadius ?? 0);
+			if (!config || config.negative || !(radius > (more.externalRadius ?? 0)) || !config.angle) return;
+			const { min = 0, max = 1 } = config.darkness ?? {};
+			if (darkness < min || darkness > max) return;
+			const rgb = config.color?.rgb ?? (config.color ? foundry.utils.Color?.from(config.color)?.rgb : null);
+			const strength = Math.min(Math.max(config.alpha ?? 0.5, 0), 1);
+			lights.push({ x: at.x, y: at.y, z: Math.round(at.z * 100) / 100, radius, bright: Math.min(Math.abs(config.bright ?? 0) * per + (more.externalRadius ?? 0), radius),
+				color: rgb ? Array.from(rgb, (c) => 1 + (c - 1) * strength) : [1, 1, 1], walls: more.walls !== false, angle: config.angle ?? 360, rotation: more.rotation ?? 0,
+				attenuation: config.attenuation ?? 0.5, externalRadius: more.externalRadius ?? 0, reflectedOnly: false, dimLevel });
+		};
+		for (const light of scene?.lights ?? []) {
+			if (light.viewed !== false || light.hidden) continue;
+			add(light.config, { x: light.x, y: light.y, z: (light.elevation ?? 0) * per }, { walls: light.walls, rotation: light.rotation });
+		}
+		for (const token of scene?.tokens ?? []) {
+			if (token.viewed !== false || token.hidden) continue;
+			const size = canvas.dimensions?.size ?? 100;
+			const middle = token.getLightOrigin?.() ?? { x: token.x + ((token.width ?? 1) * size) / 2, y: token.y + ((token.height ?? 1) * size) / 2 };
+			add(token.light, { x: middle.x, y: middle.y, z: tokenHeights(token).eye },
+				{ rotation: token.rotation, externalRadius: (Math.min(token.width ?? 1, token.height ?? 1) * size) / 2 });
+		}
+		return lights;
 	}
 
 	/** A light source as the script takes it. */
@@ -245,7 +291,7 @@ export class PathTracedLighting {
 	 */
 	#read(anyway = false) {
 		if (!this.#cover || !this.#treeJson) return false;
-		const sources = value('lights') ? this.#sources().map((source) => this.#describe(source)) : null;
+		const sources = value('lights') ? [...this.#sources().map((source) => this.#describe(source)), ...this.#elsewhere()] : null;
 		const width = value('pictureWidth');
 		const { ground, ceiling } = viewedFloors();
 		const picture = { width, height: Math.max(1, Math.round((width * this.#root.height) / this.#root.width)),

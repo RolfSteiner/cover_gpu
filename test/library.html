@@ -427,10 +427,13 @@ try {
 		const below = { underTheRoof: red(600, 450), besideTheRoom: red(850, 400) };
 		// down there the lamp lights nothing, which is what this picture has to show
 		report.lightOnARoofFromBelow.ok = report.lightOnARoofFromBelow.offAwayFromEdges === 0 && report.lightOnARoofFromBelow.lit === 0;
+		// a roof that says it is no floor of the picture: the place shows the ground under it
+		gpu.traceLights(roofed.replace('"z":200,', '"z":200,"noFloor":1,'), lamp, { ...size, samples: 1, bounces: 0, floor: 0, ceiling: 400 });
+		above.underARoofThatIsNoFloor = red(600, 450);
 		// the light that is thrown back stays on the floor it fell on when it is smoothed
 		gpu.traceLights(roofed, lamp.map((l) => ({ ...l, reflectedOnly: true })), { ...size, samples: 32, bounces: 2, smoothing: 4, floor: 0, ceiling: 400 });
 		keep('thrown back, roof and ground');
-		report.raisedFloor = { above, below, ok: above.onTheRoof > 200 && above.besideTheRoom < 8 && below.underTheRoof < 8 && below.besideTheRoom < 8
+		report.raisedFloor = { above, below, ok: above.onTheRoof > 200 && above.besideTheRoom < 8 && above.underARoofThatIsNoFloor < 8 && below.underTheRoof < 8 && below.besideTheRoom < 8
 			&& report.lightOnARoofFromItsLevel.onARaisedFloor > 0 && report.lightOnARoofFromBelow.onARaisedFloor === 0 };
 		show();
 	}

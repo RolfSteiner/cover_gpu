@@ -16,6 +16,11 @@
 //    Foundry counts in grid squares. A token looks from its top, and a light it carries is held
 //    there.
 //  - Light sources that are no token's are at the elevation they say.
+//  - Levels. A scene of Foundry's may have several levels, each a range of elevations, and a
+//    wall, a light or a region may say which of them it is part of. Foundry draws and works
+//    with what is part of the viewed level only. A wall that names levels stands, for the light
+//    of the whole scene, within the elevations of those levels and no further (`levelRange`):
+//    the walls of the ground floor do not go up through the floors above it.
 //  - Floors, ceilings and roofs are the surfaces Foundry's regions define: a region with a
 //    "Define Surface" behavior has a surface at the bottom of its elevation range, at its top,
 //    or both, over the area of its shapes, and the behavior says whether the surface stops
@@ -43,16 +48,42 @@ function said(value, none) {
 }
 
 /**
+ * The elevations the levels reach over that a wall, a light or a region says it is part of, in
+ * scene pixels: from the lowest bottom to the highest top among them. Without end both ways for
+ * one that names no level, which makes it part of all of them.
+ * @param {WallDocument|AmbientLightDocument|RegionDocument} document
+ * @returns {{bottom: number, top: number}}
+ */
+export function levelRange(document) {
+	const levels = document.parent?.levels;
+	let bottom = Infinity;
+	let top = -Infinity;
+	for (const id of (levels && document.levels?.size ? document.levels : [])) {
+		const range = levels.get(id)?.elevation;
+		if (!range) continue;
+		bottom = Math.min(bottom, said(range.bottom, -Infinity));
+		top = Math.max(top, said(range.top, Infinity));
+	}
+	if (!(bottom <= top)) return { bottom: -Infinity, top: Infinity };
+	const per = perUnit();
+	return { bottom: bottom * per, top: top * per };
+}
+
+/**
  * Between which heights a wall stands, in scene pixels; -Infinity and Infinity where it names
  * no bottom or no top.
  * @param {WallDocument} document
+ * @param {boolean} [withinLevels] true to have a wall that names levels end where those levels
+ *   end, which is how it stands in the scene as a whole
  * @returns {{bottom: number, top: number}}
  */
-export function wallHeights(document) {
-	if (document.parent?.flags?.[WALL_HEIGHT]?.advancedVision === false) return { bottom: -Infinity, top: Infinity };
-	const flags = document.flags?.[WALL_HEIGHT] ?? {};
+export function wallHeights(document, withinLevels = false) {
+	const flags = document.parent?.flags?.[WALL_HEIGHT]?.advancedVision === false ? {} : document.flags?.[WALL_HEIGHT] ?? {};
 	const per = perUnit();
-	return { bottom: said(flags.bottom, -Infinity) * per, top: said(flags.top, Infinity) * per };
+	const heights = { bottom: said(flags.bottom, -Infinity) * per, top: said(flags.top, Infinity) * per };
+	if (!withinLevels) return heights;
+	const range = levelRange(document);
+	return { bottom: Math.max(heights.bottom, range.bottom), top: Math.min(heights.top, range.top) };
 }
 
 /**
@@ -116,14 +147,18 @@ export function viewedFloors() {
  * The flat surfaces of the viewed level that stop anything: `{ z, light, move, sight, t }` each,
  * with `z` the height in scene pixels, `light`, `move` and `sight` 1 where the surface stops
  * that, and `t` the triangles of its area, six numbers each (the x and y of three corners).
+ * @param {boolean} [everyLevel] true for the surfaces of the whole scene. One whose region is
+ *   not part of the viewed level then says `noFloor`: 1: it stops what it stops, but is no
+ *   floor that is seen while this level is viewed
  * @returns {object[]}
  */
-export function surfaceList() {
+export function surfaceList(everyLevel = false) {
 	const scene = canvas.scene;
 	if (typeof scene?.getSurfaces !== 'function') return [];
 	const per = perUnit();
 	const list = [];
-	for (const surface of scene.getSurfaces(canvas.level ? { level: canvas.level } : {})) {
+	const viewed = canvas.level ?? null;
+	for (const surface of scene.getSurfaces(viewed && !everyLevel ? { level: viewed } : {})) {
 		if (!Number.isFinite(surface.elevation) || !(surface.light || surface.move || surface.sight)) continue;
 		const { vertices, indices } = surface.region?.triangulation ?? {};
 		if (!vertices || !indices?.length) continue;
@@ -134,7 +169,10 @@ export function surfaceList() {
 			if ((corners[2] - corners[0]) * (corners[5] - corners[1]) === (corners[3] - corners[1]) * (corners[4] - corners[0])) continue;
 			t.push(...corners);
 		}
-		if (t.length) list.push({ z: Math.round(surface.elevation * per * 100) / 100, light: surface.light ? 1 : 0, move: surface.move ? 1 : 0, sight: surface.sight ? 1 : 0, t });
+		if (!t.length) continue;
+		const entry = { z: Math.round(surface.elevation * per * 100) / 100, light: surface.light ? 1 : 0, move: surface.move ? 1 : 0, sight: surface.sight ? 1 : 0, t };
+		if (everyLevel && viewed && surface.region?.includedInLevel?.(viewed) === false) entry.noFloor = 1;
+		list.push(entry);
 	}
 	return list;
 }

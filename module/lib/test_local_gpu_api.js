@@ -14,7 +14,8 @@
 //  - A surface is `{ z, light, move, t }`: it lies level at the height `z`, `light` and `move`
 //    are 1 when it stops light and movement, and `t` holds the triangles that make up its area,
 //    six numbers each (the x and y of three corners). It is the floor of what is above it: what
-//    sets off on it and goes up does not pass through it.
+//    sets off on it and goes up does not pass through it. With `noFloor`: 1 it stops what it
+//    stops, but is never a floor `traceLights` shows the light on.
 //
 // It works in a browser only: Node has no WebGL. The wasm library loads while this module is
 // imported (top-level await), so `cover` is ready to call as soon as the import has finished.
@@ -193,8 +194,8 @@ export const cover = {
 	 * more light than that is white too. The call returns when the picture is drawn.
 	 *
 	 * The picture shows the light on the floor of the map. The ground lies level at the height
-	 * `picture.floor`. Where a surface that stops movement lies over a place, at the height of
-	 * the ground or above it and below `picture.ceiling`, the highest such surface is the floor
+	 * `picture.floor`. Where a surface that stops movement (and does not say `noFloor`) lies over
+	 * a place, above the ground and below `picture.ceiling`, the highest such surface is the floor
 	 * there: a place under a raised floor shows the light on that floor, a place beside it the
 	 * light on the ground. Light runs through the room: a source is at its own height, a
 	 * wall stops light between its bottom and its top (light passes over a low wall and under a

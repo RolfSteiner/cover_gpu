@@ -51,15 +51,17 @@ export function wallSurface(document) {
  * where an open door restricts nothing and the thresholds are in scene pixels.
  *
  * @param {WallDocument} document
+ * @param {boolean} [withinLevels] true to have a wall that names levels end where those levels
+ *   end (see heights.mjs)
  * @returns {WallEffect}
  */
-export function wallEffect(document) {
+export function wallEffect(document, withinLevels = false) {
 	const edge = document.edge;
 	if (edge) {
 		const { light = 0, sight = 0, sound = 0, attenuation = false } = edge.threshold ?? {};
 		return { move: edge.move, light: edge.light, sight: edge.sight, sound: edge.sound, dir: edge.direction,
 			lightThreshold: light || 0, sightThreshold: sight || 0, soundThreshold: sound || 0, attenuation: attenuation ? 1 : 0,
-			...wallSurface(document), ...wallHeights(document) };
+			...wallSurface(document), ...wallHeights(document, withinLevels) };
 	}
 	// A wall without an Edge (its scene has not set up its edges yet) is read the way
 	// WallDocument makes the Edge.
@@ -78,7 +80,7 @@ export function wallEffect(document) {
 		soundThreshold: (threshold.sound || 0) * pixels,
 		attenuation: threshold.attenuation ? 1 : 0,
 		...wallSurface(document),
-		...wallHeights(document),
+		...wallHeights(document, withinLevels),
 	};
 }
 
@@ -91,12 +93,18 @@ export function wallEffect(document) {
  * the script reads as "as far as the map goes"). With the tree go the flat surfaces of the
  * scene, in `surfaces`.
  *
+ * The quadtree of the canvas holds the walls of the viewed level. For the scene as a whole,
+ * `others` names the walls that are not in it: they are put with the objects of the root node,
+ * which the script reads like any other, and `withinLevels` makes every wall that names levels
+ * end where those levels end.
+ *
  * @param {foundry.canvas.geometry.Quadtree} quadtree a quadtree whose objects are walls (Wall
  *   placeables, as in `canvas.walls.quadtree`)
  * @param {object[]} [surfaces] the flat surfaces, as `surfaceList` of heights.mjs gives them
+ * @param {{others?: Iterable<WallDocument>, withinLevels?: boolean}} [whole]
  * @returns {string}
  */
-export function quadtreeJson(quadtree, surfaces = []) {
+export function quadtreeJson(quadtree, surfaces = [], { others = [], withinLevels = false } = {}) {
 	const nodes = [];
 	// The script reads every value as a whole number, so a box is rounded outwards: it may
 	// get larger by less than a unit, never smaller.
@@ -110,7 +118,7 @@ export function quadtreeJson(quadtree, surfaces = []) {
 	const effectOf = (wall) => {
 		if (!effects.has(wall)) {
 			// JSON has no way to write "without end"
-			const { bottom, top, ...effect } = wallEffect(wall.document);
+			const { bottom, top, ...effect } = wallEffect(wall.document, withinLevels);
 			if (Number.isFinite(bottom)) effect.bottom = bottom;
 			if (Number.isFinite(top)) effect.top = top;
 			effects.set(wall, effect);
@@ -130,5 +138,11 @@ export function quadtreeJson(quadtree, surfaces = []) {
 		return nodes.length - 1;
 	};
 	const root = add(quadtree);
+	for (const document of others) {
+		const [x0, y0, x1, y1] = document.c;
+		if (x0 === x1 && y0 === y1) continue;
+		nodes[root].objects.push({ n: 1, r: box({ x: Math.min(x0, x1), y: Math.min(y0, y1), width: Math.abs(x1 - x0), height: Math.abs(y1 - y0) }),
+			t: { a: { x: x0, y: y0 }, b: { x: x1, y: y1 } }, w: effectOf({ document }) });
+	}
 	return JSON.stringify({ root, nodes, surfaces });
 }

@@ -40,6 +40,11 @@ What that changes:
   make it; light passes under a wall that begins higher up; a roof keeps light out, or in. The
   reach of a light counts with the difference in height. A wall without a top throws light back
   up to the setting "Height of walls without a top" above the floor.
+- **Levels.** The light of the whole scene is traced, whichever level is viewed: the lights and
+  the tokens with a light on other levels too, which Foundry itself neither sets up nor draws,
+  with the walls and surfaces of every level in the way. A wall that names levels ends, for
+  the light, where those levels end. Light passes from one level to another wherever no
+  surface or wall stops it, so a floor between two levels needs a region that defines one.
 - **Cover.** The cover test looks from the height the token looks from at the other token from
   its feet to its head (setting "Cover test: heights"). A low wall hides the lower part of what
   stands behind it, a floor hides what is under it from above.

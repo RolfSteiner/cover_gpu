@@ -999,7 +999,10 @@ def coverFrom(p: float3; target: float4; radius: float; heights: int; var rays: 
 // is a JSON object with the nodes of the tree in `nodes`, the place of the root among them in
 // `root`, and the flat surfaces in `surfaces`, which may be left out. A surface lies level at
 // the height `z`; `light` and `move` are 1 when it stops light and movement; `t` holds the
-// triangles that make up its area, six numbers each: the x and y of three corners.
+// triangles that make up its area, six numbers each: the x and y of three corners. A surface
+// that stops movement can be a floor the picture of the light shows the light on (see
+// LIGHT_SOURCE), unless it says `noFloor`: 1, as a surface does that is not part of what the
+// picture shows.
 def readScene(treeS: string) : Scene
 	var jError: string
 	var Jtree = read_json(treeS,jError)
@@ -1013,7 +1016,7 @@ def readScene(treeS: string) : Scene
 			let a = float2(s.t[k * 6], s.t[k * 6 + 1])
 			let b = float2(s.t[k * 6 + 2], s.t[k * 6 + 3])
 			let c = float2(s.t[k * 6 + 4], s.t[k * 6 + 5])
-			push(scene.flats, Flat(one = float4(a.x, a.y, b.x, b.y), two = float4(c.x, c.y, s.z, 0.0), light = s.light != 0, move = s.move != 0))
+			push(scene.flats, Flat(one = float4(a.x, a.y, b.x, b.y), two = float4(c.x, c.y, s.z, 0.0), light = s.light != 0, move = s.move != 0, floor = s.move != 0 && s.noFloor == 0))
 	return <- scene
 
 // Adds one entry per object of the cell and of the cells below it: a cell's own objects, then
@@ -1060,11 +1063,12 @@ def flatsOf(flats: array<Flat>; stops: int) : array<float4>
 	return <- data
 
 // The flat surfaces that are floors above the ground, as the shaders take them (FLAT_PIXELS
-// float4 per triangle): those that stop movement and lie above `ground` and below `ceiling`.
+// float4 per triangle): those that can be a floor (see readScene) and lie above `ground` and
+// below `ceiling`.
 def floorsOf(flats: array<Flat>; ground: float; ceiling: float) : array<float4>
 	var data: array<float4>
 	for i in flats
-		if i.move && i.two.z > ground && i.two.z < ceiling
+		if i.floor && i.two.z > ground && i.two.z < ceiling
 			push(data, i.one)
 			push(data, i.two)
 	return <- data
@@ -1566,6 +1570,7 @@ struct Ssurface
 	z: float
 	light: int
 	move: int
+	noFloor: int
 	t: array<float>
 
 struct Stree
@@ -1573,12 +1578,14 @@ struct Stree
 	nodes: array<Snode>
 	surfaces: array<Ssurface>
 
-// One triangle of a flat surface, as hitsSurface reads it, and what the surface stops.
+// One triangle of a flat surface, as hitsSurface reads it, what the surface stops, and whether
+// it can be a floor of the picture of the light.
 struct Flat
 	one: float4
 	two: float4
 	light: bool
 	move: bool
+	floor: bool
 
 // What readScene makes of the JSON text: the tree of the walls, and every triangle of the flat
 // surfaces.

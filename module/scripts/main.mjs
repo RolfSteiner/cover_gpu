@@ -43,7 +43,9 @@ Hooks.once('ready', wrapVisioner);
 // moment after the hook; the same hooks fire for changes that leave the tree as it is, which
 // the layer tells apart.
 const refresh = foundry.utils.debounce(() => canvas[LAYER]?.refreshTree(), 200);
-for (const hook of ['canvasReady', 'drawWall', 'refreshWall', 'updateWall', 'destroyWall']) Hooks.on(hook, refresh);
+// A wall of a level that is not viewed is no object on the canvas, but it is in the way of
+// the light all the same, so the changes of the wall documents are followed too.
+for (const hook of ['canvasReady', 'drawWall', 'refreshWall', 'createWall', 'updateWall', 'deleteWall', 'destroyWall']) Hooks.on(hook, refresh);
 
 // The cover test follows the tokens: which one is selected, where each is (a token being
 // dragged or moved is refreshed all the way), and which there are.
@@ -54,6 +56,12 @@ for (const hook of ['controlToken', 'refreshToken', 'drawToken', 'destroyToken',
 // Foundry calls these when it has set up its light sources again, and whenever it draws the
 // lighting anew: a light or a token with a light was added, changed, moved or removed.
 for (const hook of ['initializeLightSources', 'lightingRefresh']) {
+	Hooks.on(hook, () => canvas[LAYER]?.lightsChanged());
+}
+// A light, or a token with a light, of a level that is not viewed has no light source of
+// Foundry's, and Foundry draws nothing anew when it changes; its light is in the path traced
+// picture all the same.
+for (const hook of ['createAmbientLight', 'updateAmbientLight', 'deleteAmbientLight', 'createToken', 'updateToken', 'deleteToken']) {
 	Hooks.on(hook, () => canvas[LAYER]?.lightsChanged());
 }
 // Foundry makes the parts of its vision mask anew with a scene, and draws into them each time

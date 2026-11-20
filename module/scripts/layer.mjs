@@ -104,6 +104,12 @@ export class CoverViewLayer extends InteractionLayer {
 	/** The tree all results were calculated on, as the JSON text the script reads. */
 	#treeJson = '';
 
+	/**
+	 * The scene as a whole, as the path traced light takes it: that tree with the walls of the
+	 * levels that are not viewed, and the surfaces of every level.
+	 */
+	#lightJson = '';
+
 	/** The bounds of the root cell of that tree. */
 	#root = null;
 
@@ -200,6 +206,7 @@ export class CoverViewLayer extends InteractionLayer {
 		this.#held = null;
 		// everything has to be drawn again, even on an unchanged tree
 		this.#treeJson = '';
+		this.#lightJson = '';
 		// ahead of Foundry's perception update, which runs at the priority Foundry names PERCEPTION
 		const perception = PIXI.UPDATE_PRIORITY.PERCEPTION ?? PIXI.UPDATE_PRIORITY.NORMAL + 2;
 		canvas.app?.ticker?.remove(this.#beforePerception, this);
@@ -268,11 +275,16 @@ export class CoverViewLayer extends InteractionLayer {
 	refreshTree() {
 		if (!this.#cover || !this.#parts || !canvas.scene || !canvas.walls?.quadtree) return;
 		const json = quadtreeJson(canvas.walls.quadtree, surfaceList());
-		if (json === this.#treeJson) return;
+		// Light gets everywhere. Foundry has only the walls of the viewed level on the canvas; the
+		// others are read from the scene, and each wall ends where its levels end.
+		const elsewhere = [...(canvas.scene.walls ?? [])].filter((document) => document.viewed === false);
+		const lightJson = quadtreeJson(canvas.walls.quadtree, surfaceList(true), { others: elsewhere, withinLevels: true });
+		if (json === this.#treeJson && lightJson === this.#lightJson) return;
 		const tree = JSON.parse(json);
 		const root = tree.nodes[tree.root].bounds;
 		if (!(root.width > 0 && root.height > 0)) return;
 		this.#treeJson = json;
+		this.#lightJson = lightJson;
 		this.#root = root;
 		this.#shares.clear();
 		this.#cells = [];
@@ -290,7 +302,7 @@ export class CoverViewLayer extends InteractionLayer {
 		walk(tree.root, 0);
 		for (const ray of this.#rays) this.#runRay(ray);
 		this.#readTokens(true);
-		this.#lighting.setWalls(this.#cover, json, root);
+		this.#lighting.setWalls(this.#cover, lightJson, root);
 		this.#redraw();
 	}
 
