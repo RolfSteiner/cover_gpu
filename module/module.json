@@ -2,7 +2,7 @@
 	"id": "cover-quadtree-view",
 	"title": "Cover: Quadtree View",
 	"description": "Path traces the light of the scene's light sources in place of Foundry's own light meshes, with walls that scatter or mirror light by how metallic and how smooth each of their faces is set to be, and draws a view for the GM (rays, quadtree cells, and a cover test from the selected token to all others). Works on the walls of the open scene as stored in canvas.walls.quadtree, with their properties, and in three dimensions: with the heights of walls (the module Wall Height), the elevation of tokens and lights, and the floors and roofs that regions define.",
-	"version": "0.14.0",
+	"version": "0.14.1",
 	"compatibility": {
 		"minimum": "14",
 		"verified": "14.370"

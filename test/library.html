@@ -99,14 +99,16 @@ try {
 		const hit = den > 0 ? (t >= 0 && t <= den && u >= 0 && u <= den) : (t <= 0 && t >= den && u <= 0 && u >= den);
 		return hit ? { at: t / den, den } : null;
 	};
+	const inTriangle = (s, px, py) => {
+		const side = (p, q) => (q[0] - p[0]) * (py - p[1]) - (q[1] - p[1]) * (px - p[0]);
+		const s1 = side(s.a, s.b), s2 = side(s.b, s.c), s3 = side(s.c, s.a);
+		return (s1 >= 0 && s2 >= 0 && s3 >= 0) || (s1 <= 0 && s2 <= 0 && s3 <= 0);
+	};
 	const hitsSurface = (o, d, s) => {
 		const lo = Math.min(o.z, o.z + d.z), hi = Math.max(o.z, o.z + d.z);
 		if (!(s.z > lo && s.z <= hi)) return false;
 		const at = (s.z - o.z) / d.z;
-		const px = o.x + d.x * at, py = o.y + d.y * at;
-		const side = (p, q) => (q[0] - p[0]) * (py - p[1]) - (q[1] - p[1]) * (px - p[0]);
-		const s1 = side(s.a, s.b), s2 = side(s.b, s.c), s3 = side(s.c, s.a);
-		return (s1 >= 0 && s2 >= 0 && s3 >= 0) || (s1 <= 0 && s2 <= 0 && s3 <= 0);
+		return inTriangle(s, o.x + d.x * at, o.y + d.y * at);
 	};
 	const offWall = (p, w) => {
 		const vx = p.x - w.ox, vy = p.y - w.oy;
@@ -356,10 +358,17 @@ try {
 		const ms = performance.now() - started;
 		const image = pixelsOf();
 		keep(name);
-		const row = { took, ms: +ms.toFixed(1), pixels: 0, lit: 0, worst: 0, offByMoreThan3: 0, offAwayFromEdges: 0, example: null };
-		const floor = picture.floor ?? 0;
+		const row = { took, ms: +ms.toFixed(1), pixels: 0, onARaisedFloor: 0, lit: 0, worst: 0, offByMoreThan3: 0, offAwayFromEdges: 0, example: null };
+		// the floor of a place: the highest surface that stops movement over it, above the
+		// ground and below the ceiling, or the ground
+		const ground = picture.floor ?? 0;
+		const floors = trianglesOf(tree, 'move').filter((s) => s.z > ground && s.z < (picture.ceiling ?? Infinity));
+		const floorAt = (px, py) => floors.reduce((z, s) => (s.z > z && inTriangle(s, px, py) ? s.z : z), ground);
+		row.floors = floors.length;
 		for (let y = 3; y < picture.height; y += 7) for (let x = 3; x < picture.width; x += 7) {
-			const at = { x: area.x + area.width * (x + 0.5) / picture.width, y: area.y + area.height * (y + 0.5) / picture.height, z: floor };
+			const at = { x: area.x + area.width * (x + 0.5) / picture.width, y: area.y + area.height * (y + 0.5) / picture.height };
+			at.z = floorAt(at.x, at.y);
+			if (at.z !== ground) row.onARaisedFloor++;
 			const want = lightExpected(at, lights, walls, surfaces);
 			const index = (y * picture.width + x) * 4;
 			const got = [image.data[index], image.data[index + 1], image.data[index + 2]];
@@ -373,7 +382,9 @@ try {
 				// side of it in single precision; anywhere else it has to match
 				let steady = true;
 				for (const [dx, dy] of [[near, 0], [-near, 0], [0, near], [0, -near], [near, near], [-near, -near], [near, -near], [-near, near]]) {
-					const other = lightExpected({ x: at.x + dx, y: at.y + dy, z: floor }, lights, walls, surfaces);
+					// the edge of a raised floor is such an edge too
+					if (floorAt(at.x + dx, at.y + dy) !== at.z) steady = false;
+					const other = lightExpected({ x: at.x + dx, y: at.y + dy, z: at.z }, lights, walls, surfaces);
 					if (Math.max(...other.map((v, c) => Math.abs(v - want[c]))) > 3) steady = false;
 				}
 				if (steady) { row.offAwayFromEdges++; row.example ??= { at, want: want.map(Math.round), got }; }
@@ -401,6 +412,28 @@ try {
 	compare('lightOverALowWall', yard, [{ x: 150, y: 400, z: 180, radius: 1200, bright: 600 }], size);
 	compare('lightFromTheFloor', yard, [{ x: 150, y: 400, z: 0, radius: 1200, bright: 600 }], size);
 	compare('lightFromAbove', yard, [{ x: 420, y: 400, z: 400, radius: 1500, bright: 700, color: [1, 0.8, 0.6] }, { x: 900, y: 150, z: 20, radius: 600, bright: 100, angle: 120, rotation: 90 }], size);
+
+	// A room with a roof, and a lamp standing on the roof. Seen from the level of the roof, the
+	// roof is the floor there and is lit; the ground beside the room lies in the roof's shadow.
+	// Seen from the level of the room, whose ceiling the roof is, there is ground only.
+	{
+		const walls = [[400, 250, 700, 250], [700, 250, 700, 550], [700, 550, 400, 550], [400, 550, 400, 250]].map((c) => ({ c, w: { light: NORMAL, move: NORMAL, dir: 0, top: 200 } }));
+		const roofed = single(walls, [{ z: 200, light: 1, move: 1, t: [400, 250, 700, 250, 700, 550, 400, 250, 700, 550, 400, 550] }]);
+		const lamp = [{ x: 550, y: 400, z: 220, radius: 1500, bright: 700 }];
+		compare('lightOnARoofFromItsLevel', roofed, lamp, { ...size, floor: 0, ceiling: 400 });
+		const red = (px, py) => pixelsOf().data[(Math.round(py / 2) * size.width + Math.round(px / 2)) * 4];
+		const above = { onTheRoof: red(600, 450), besideTheRoom: red(850, 400), farFromIt: red(100, 100) };
+		compare('lightOnARoofFromBelow', roofed, lamp, { ...size, floor: 0, ceiling: 200 });
+		const below = { underTheRoof: red(600, 450), besideTheRoom: red(850, 400) };
+		// down there the lamp lights nothing, which is what this picture has to show
+		report.lightOnARoofFromBelow.ok = report.lightOnARoofFromBelow.offAwayFromEdges === 0 && report.lightOnARoofFromBelow.lit === 0;
+		// the light that is thrown back stays on the floor it fell on when it is smoothed
+		gpu.traceLights(roofed, lamp.map((l) => ({ ...l, reflectedOnly: true })), { ...size, samples: 32, bounces: 2, smoothing: 4, floor: 0, ceiling: 400 });
+		keep('thrown back, roof and ground');
+		report.raisedFloor = { above, below, ok: above.onTheRoof > 200 && above.besideTheRoom < 8 && below.underTheRoof < 8 && below.besideTheRoom < 8
+			&& report.lightOnARoofFromItsLevel.onARaisedFloor > 0 && report.lightOnARoofFromBelow.onARaisedFloor === 0 };
+		show();
+	}
 
 	// --- F: light on a map without heights is what it always was -----------------------------
 	if (old) {

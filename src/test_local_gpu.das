@@ -133,19 +133,9 @@ int hitsEntry(vec3 o, vec3 d, int i, out float at) \{
 	return z >= more.y && z <= more.z ? 2 : 1;
 \}
 
-// True when the ray passes through flat surface i, and where along it. A surface is a triangle
-// lying level, two pixels of u_surfaces: its three corners on the map, then its height. A ray
-// that sets off on the surface and goes up does not pass through it, and one that comes up to
-// end on it does, as Scene#testSurfaceCollision of Foundry has it: the surface is the floor of
-// what is above it.
-bool hitsSurface(vec3 o, vec3 d, int i, out float at) \{
-	at = 0.0;
-	vec4 one = texelFetch(u_surfaces, ivec2(0, i), 0);
-	vec4 two = texelFetch(u_surfaces, ivec2(1, i), 0);
-	float z = two.z;
-	if (!(z > min(o.z, o.z + d.z) && z <= max(o.z, o.z + d.z))) return false;
-	at = (z - o.z) / d.z;
-	vec2 p = o.xy + d.xy * at;
+// True when a place on the map lies in a triangle, which is two pixels of a texture: its three
+// corners (x and y of the first two, then of the third), then its height.
+bool inTriangle(vec2 p, vec4 one, vec4 two) \{
 	vec2 ab = one.zw - one.xy;
 	vec2 bc = two.xy - one.zw;
 	vec2 ca = one.xy - two.xy;
@@ -153,6 +143,20 @@ bool hitsSurface(vec3 o, vec3 d, int i, out float at) \{
 	float s2 = bc.x * (p.y - one.w) - bc.y * (p.x - one.z);
 	float s3 = ca.x * (p.y - two.y) - ca.y * (p.x - two.x);
 	return (s1 >= 0.0 && s2 >= 0.0 && s3 >= 0.0) || (s1 <= 0.0 && s2 <= 0.0 && s3 <= 0.0);
+\}
+
+// True when the ray passes through flat surface i, and where along it. A surface is a triangle
+// lying level, two pixels of u_surfaces (see inTriangle). A ray that sets off on the surface
+// and goes up does not pass through it, and one that comes up to end on it does, as
+// Scene#testSurfaceCollision of Foundry has it: the surface is the floor of what is above it.
+bool hitsSurface(vec3 o, vec3 d, int i, out float at) \{
+	at = 0.0;
+	vec4 one = texelFetch(u_surfaces, ivec2(0, i), 0);
+	vec4 two = texelFetch(u_surfaces, ivec2(1, i), 0);
+	float z = two.z;
+	if (!(z > min(o.z, o.z + d.z) && z <= max(o.z, o.z + d.z))) return false;
+	at = (z - o.z) / d.z;
+	return inTriangle(o.xy + d.xy * at, one, two);
 \}
 "
 
@@ -243,10 +247,15 @@ void main() \{
 \}
 "
 
-// The picture of the light: one pixel per place on the floor of the map, as bright as the light
-// that gets there, in the color of that light. The floor is level, at the height u_floor. Light
-// arrives straight from the sources, and after bouncing off walls and flat surfaces. A face of
-// a wall scatters light to all sides, mirrors it, or does some of each (see BOUNCE_SOURCE).
+// The picture of the light: one pixel per place of the map, as bright as the light that gets to
+// the floor there, in the color of that light. The floor is not at one height all over the map.
+// The ground lies level at the height u_floor, and above it there may be floors: triangles
+// lying level, each at a height of its own, two pixels of u_floors each (see inTriangle). The
+// floor of a place is the highest of the floors over it, and the ground where there is none
+// (see floorAt). So a place under a raised floor shows the light on that floor, not the light
+// on the ground below it, and a place beside it shows the light on the ground. Light arrives
+// straight from the sources, and after bouncing off walls and flat surfaces. A face of a wall
+// scatters light to all sides, mirrors it, or does some of each (see BOUNCE_SOURCE).
 //
 // It is drawn in three steps, each a program of its own (see tracePicture):
 //  1. BOUNCE_SOURCE finds the light that is thrown back to the floor, by path tracing. It is
@@ -303,14 +312,27 @@ uniform int u_lightCount;
 uniform vec4 u_area;
 uniform vec2 u_size;
 uniform float u_floor;
+uniform sampler2D u_floors;
+uniform int u_floorCount;
 const float GAMMA = 2.2;
 const float LIMITED = 10.0;
 const float PROXIMITY = 30.0;
 
-// the place on the floor a pixel of the picture shows; the picture has its first row at the
-// bottom, the map has it at the top
+// how high the floor lies at a place on the map
+float floorAt(vec2 p) \{
+	float z = u_floor;
+	for (int i = 0; i < u_floorCount; i++) \{
+		vec4 two = texelFetch(u_floors, ivec2(1, i), 0);
+		if (two.z > z && inTriangle(p, texelFetch(u_floors, ivec2(0, i), 0), two)) z = two.z;
+	\}
+	return z;
+\}
+
+// the place a pixel of the picture shows, on the floor that is there; the picture has its first
+// row at the bottom, the map has it at the top
 vec3 placeOf(vec2 pixel) \{
-	return vec3(mix(u_area.x, u_area.z, pixel.x / u_size.x), mix(u_area.w, u_area.y, pixel.y / u_size.y), u_floor);
+	vec2 p = vec2(mix(u_area.x, u_area.z, pixel.x / u_size.x), mix(u_area.w, u_area.y, pixel.y / u_size.y));
+	return vec3(p, floorAt(p));
 \}
 
 // an amount of light as a pixel holds it, and back
@@ -424,7 +446,7 @@ vec3 arriving(int k, vec3 place, vec3 normal, out vec3 toward) \{
 // to the first wall or flat surface that stops it and collects the light that point gets
 // straight from the sources; then it leaves in a random direction, more likely near the normal
 // of the face, and does the same at the next thing it meets, up to u_bounces times. A path that
-// meets nothing has left for the sky, and one that comes back down to the floor ends there.
+// meets nothing has left for the sky, and one that comes down to the ground ends there.
 //
 // What a face does with light is told by how metallic and how smooth it is, as in the material
 // of a renderer. All faces are of one brightness, BASE.
@@ -538,7 +560,7 @@ void main() \{
 					level = true;
 				\}
 			\}
-			// back down on the floor, or off to the sky
+			// down on the ground, or off to the sky
 			if (d.z < 0.0 && (u_floor - from.z) / d.z < best) break;
 			if ((hit < 0 && !level) || best > 1.0) break;
 			// the face the path arrived on, and what that face is like
@@ -589,7 +611,8 @@ void main() \{
 // Step 2, run several times: each pixel of u_picture averaged with the pixels u_step and
 // 2 * u_step away from it in every direction, the nearer ones counting for more. A pixel on
 // the far side of a wall that stands on the floor is left out, so light never seeps through
-// such a wall.
+// such a wall, and so is a pixel whose floor lies at another height: the light on a raised
+// floor is not the light on the ground beside it.
 let SMOOTH_SOURCE = "
 uniform sampler2D u_picture;
 uniform int u_step;
@@ -614,18 +637,21 @@ bool parts(vec2 from, vec2 to, vec4 wall) \{
 
 void main() \{
 	ivec2 pixel = ivec2(gl_FragCoord.xy);
-	vec2 place = placeOf(gl_FragCoord.xy).xy;
+	vec3 here = placeOf(gl_FragCoord.xy);
+	vec2 place = here.xy;
 	vec3 sum = vec3(0.0);
 	float shares = 0.0;
 	for (int j = -2; j <= 2; j++) \{
 		for (int i = -2; i <= 2; i++) \{
 			ivec2 other = pixel + ivec2(i, j) * u_step;
 			if (other.x < 0 || other.y < 0 || other.x >= int(u_size.x) || other.y >= int(u_size.y)) continue;
-			vec2 there = placeOf(vec2(other) + 0.5).xy;
+			vec3 across = placeOf(vec2(other) + 0.5);
+			if (abs(across.z - here.z) > 0.5) continue;
+			vec2 there = across.xy;
 			bool parted = false;
 			for (int w = 0; w < u_wallCount; w++) \{
 				vec4 stands = texelFetch(u_walls, ivec2(3, w), 0);
-				if (u_floor < stands.x || u_floor > stands.y) continue;
+				if (here.z < stands.x || here.z > stands.y) continue;
 				if (parts(place, there, texelFetch(u_walls, ivec2(0, w), 0))) \{
 					parted = true;
 					break;
@@ -710,6 +736,7 @@ var pictureTarget: uint
 var wallsTexture: uint
 var lightsTexture: uint
 var flatsTexture: uint
+var floorsTexture: uint
 var fullTarget: uint
 var entriesTexture: uint
 var raysTexture: uint
@@ -784,7 +811,8 @@ def test_light_adaptive(var treeS:string; var p:float3; width:int; height:int; s
 		push(lights, float4(0.0, 0.0, -2.0, 0.0))
 		push(lights, float4(0.0, 0.0, 0.0, p.z))
 		var inscope flats: array<float4>
-		tracePicture(sight.bounds, sight.walls, length(sight.walls) / WALL_PIXELS, lights, 1, flats, width, height, samples, bounces, 0, 1, p.z)
+		var inscope floors: array<float4>
+		tracePicture(sight.bounds, sight.walls, length(sight.walls) / WALL_PIXELS, lights, 1, flats, floors, width, height, samples, bounces, 0, 1, p.z)
 	// corners this far from p are outside the map, and so is every edge between two of them
 	// that are at most a quarter turn apart
 	let radius = sight.reach * 3.0
@@ -810,8 +838,10 @@ def test_light_adaptive(var treeS:string; var p:float3; width:int; height:int; s
 
 // Draws a picture of the light of `count` light sources onto the canvas of the WebGL context,
 // width by height pixels over the root cell of the tree; the caller has to give the canvas
-// that size beforehand. The picture shows the light on the floor of the map, which lies level
-// at the height `floor`. `lights` points at the first of count * LIGHT_PIXELS float4 that lie
+// that size beforehand. The picture shows the light on the floor of the map. The ground lies
+// level at the height `floor`; where a flat surface that stops movement lies over a place, at
+// the height of the ground or above it and below `ceiling`, the highest such surface is the
+// floor there (see LIGHT_SOURCE). `lights` points at the first of count * LIGHT_PIXELS float4 that lie
 // one after the other in memory, four per source, as LIGHT_SOURCE describes them. Each wall
 // acts on the light the way it says, between its bottom and its top (see wallOf and
 // LIGHT_SOURCE); walls that do nothing to light are left out. The flat surfaces that stop light
@@ -824,12 +854,13 @@ def test_light_adaptive(var treeS:string; var p:float3; width:int; height:int; s
 // SHOW_SOURCE). Returns how many sources, walls and triangles of surfaces took part, when the
 // picture is drawn.
 [export]
-def trace_lights(var treeS:string; lights:float4?; count:int; width:int; height:int; samples:int; bounces:int; smoothing:int; wallHeight:float; fine:int; floor:float) : string
+def trace_lights(var treeS:string; lights:float4?; count:int; width:int; height:int; samples:int; bounces:int; smoothing:int; wallHeight:float; fine:int; floor:float; ceiling:float) : string
 	var inscope scene <- readScene(treeS)
 	var inscope entries: array<Entry>
 	flatten(scene.tree, entries, false)
 	var inscope walls <- wallsOf(entries, true, floor, wallHeight)
 	var inscope flats <- flatsOf(scene.flats, STOPS_LIGHT)
+	var inscope floors <- floorsOf(scene.flats, floor, ceiling)
 	var inscope sources: array<float4>
 	for i in range(max(count, 0) * LIGHT_PIXELS)
 		unsafe
@@ -837,7 +868,7 @@ def trace_lights(var treeS:string; lights:float4?; count:int; width:int; height:
 	let wallCount = length(walls) / WALL_PIXELS
 	let flatCount = length(flats) / FLAT_PIXELS
 	if width > 0 && height > 0
-		tracePicture(scene.tree.bounds, walls, wallCount, sources, max(count, 0), flats, width, height, samples, bounces, smoothing, fine, floor)
+		tracePicture(scene.tree.bounds, walls, wallCount, sources, max(count, 0), flats, floors, width, height, samples, bounces, smoothing, fine, floor)
 	return sprint_json(Traced(lights = max(count, 0), walls = wallCount, surfaces = flatCount), false)
 
 // How much of each of several round targets the walls hide from a round source. source is the
@@ -1028,6 +1059,16 @@ def flatsOf(flats: array<Flat>; stops: int) : array<float4>
 			push(data, i.two)
 	return <- data
 
+// The flat surfaces that are floors above the ground, as the shaders take them (FLAT_PIXELS
+// float4 per triangle): those that stop movement and lie above `ground` and below `ceiling`.
+def floorsOf(flats: array<Flat>; ground: float; ceiling: float) : array<float4>
+	var data: array<float4>
+	for i in flats
+		if i.move && i.two.z > ground && i.two.z < ceiling
+			push(data, i.one)
+			push(data, i.two)
+	return <- data
+
 // Spins a ray around p in 1 degree steps (360 rays) to find the walls visible from p: each ray
 // stops at the first wall it meets, and a wall met by several rays counts once. A ray is long
 // enough to reach the farthest corner of the map from p. Then finds the visible part of each
@@ -1208,6 +1249,7 @@ def gpuInit
 	wallsTexture = dataTexture()
 	lightsTexture = dataTexture()
 	flatsTexture = dataTexture()
+	floorsTexture = dataTexture()
 	pictureA = dataTexture()
 	pictureB = dataTexture()
 	glGenFramebuffers(1, safe_addr(pictureTarget))
@@ -1340,9 +1382,10 @@ def castCover(var rays: array<float4>; entryCount: int; flatCount: int) : array<
 // read them; the first wallCount walls and lightCount sources take part, and every triangle of
 // flats. The light that is thrown back is drawn into one of two textures the size of the
 // picture, smoothed from one into the other `smoothing` times, and the last of them goes into
-// the picture on the canvas. The floor the picture shows lies at the height `floor`, and the
-// light straight from the sources is taken at fine by fine places of each pixel.
-def tracePicture(area: AABB; var walls: array<float4>; wallCount: int; var lights: array<float4>; lightCount: int; var flats: array<float4>; width, height, samples, bounces, smoothing, fine: int; floor: float)
+// the picture on the canvas. The ground lies at the height `floor`, the triangles of `floors`
+// are the floors above it (as flatsOf lists surfaces), and the light straight from the sources
+// is taken at fine by fine places of each pixel.
+def tracePicture(area: AABB; var walls: array<float4>; wallCount: int; var lights: array<float4>; lightCount: int; var flats: array<float4>; var floors: array<float4>; width, height, samples, bounces, smoothing, fine: int; floor: float)
 	gpuInit()
 	// a texture needs something to hold even when there is no wall or no source
 	if empty(walls)
@@ -1354,6 +1397,11 @@ def tracePicture(area: AABB; var walls: array<float4>; wallCount: int; var light
 	glActiveTexture(GL_TEXTURE4)
 	uploadFloats(lightsTexture, LIGHT_PIXELS, length(lights) / LIGHT_PIXELS, lights)
 	let flatCount = uploadFlats(flats)
+	let floorCount = length(floors) / FLAT_PIXELS
+	if empty(floors)
+		resize(floors, FLAT_PIXELS)
+	glActiveTexture(GL_TEXTURE7)
+	uploadFloats(floorsTexture, FLAT_PIXELS, length(floors) / FLAT_PIXELS, floors)
 	glActiveTexture(GL_TEXTURE5)
 	for picture in [[uint pictureA; pictureB]]
 		glBindTexture(GL_TEXTURE_2D, picture)
@@ -1367,13 +1415,13 @@ def tracePicture(area: AABB; var walls: array<float4>; wallCount: int; var light
 	var next = pictureB
 	if bounces > 0
 		let across = length(float2(area.max.x - area.min.x, area.max.y - area.min.y))
-		lightProgram(bounceProgram, area, wallCount, lightCount, flatCount, width, height, floor)
+		lightProgram(bounceProgram, area, wallCount, lightCount, flatCount, floorCount, width, height, floor)
 		// long enough to leave the map from anywhere on it
 		glUniform1f(glGetUniformLocation(bounceProgram, "u_far"), across * 2.0)
 		glUniform1i(glGetUniformLocation(bounceProgram, "u_samples"), clamp(samples, 1, 1024))
 		glUniform1i(glGetUniformLocation(bounceProgram, "u_bounces"), clamp(bounces, 0, 16))
 		glDrawArrays(GL_TRIANGLES, 0, 3)
-		lightProgram(smoothProgram, area, wallCount, lightCount, flatCount, width, height, floor)
+		lightProgram(smoothProgram, area, wallCount, lightCount, flatCount, floorCount, width, height, floor)
 		glUniform1i(glGetUniformLocation(smoothProgram, "u_picture"), 5)
 		for run in range(clamp(smoothing, 0, MOST_SMOOTHING))
 			glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, next, 0)
@@ -1386,7 +1434,7 @@ def tracePicture(area: AABB; var walls: array<float4>; wallCount: int; var light
 		glClearColor(0.0, 0.0, 0.0, 1.0)
 		glClear(GL_COLOR_BUFFER_BIT)
 	glBindFramebuffer(GL_FRAMEBUFFER, 0u)
-	lightProgram(showProgram, area, wallCount, lightCount, flatCount, width, height, floor)
+	lightProgram(showProgram, area, wallCount, lightCount, flatCount, floorCount, width, height, floor)
 	glBindTexture(GL_TEXTURE_2D, held)
 	glUniform1i(glGetUniformLocation(showProgram, "u_picture"), 5)
 	glUniform1i(glGetUniformLocation(showProgram, "u_fine"), clamp(fine, 1, MOST_FINE))
@@ -1398,9 +1446,10 @@ def tracePicture(area: AABB; var walls: array<float4>; wallCount: int; var light
 		glReadPixels(0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, addr(done[0]))
 
 // Makes one of the three programs of the picture the one in use and tells it what LIGHT_SOURCE
-// needs to know: where the walls, the light sources and the flat surfaces are, what the picture
-// covers and how high its floor lies. The texture of the picture stays the active one.
-def lightProgram(program: uint; area: AABB; wallCount, lightCount, flatCount, width, height: int; floor: float)
+// needs to know: where the walls, the light sources, the flat surfaces and the floors are, what
+// the picture covers and how high the ground lies. The texture of the picture stays the active
+// one.
+def lightProgram(program: uint; area: AABB; wallCount, lightCount, flatCount, floorCount, width, height: int; floor: float)
 	glUseProgram(program)
 	glUniform1i(glGetUniformLocation(program, "u_walls"), 3)
 	glUniform1i(glGetUniformLocation(program, "u_wallCount"), wallCount)
@@ -1408,6 +1457,8 @@ def lightProgram(program: uint; area: AABB; wallCount, lightCount, flatCount, wi
 	glUniform1i(glGetUniformLocation(program, "u_lightCount"), lightCount)
 	glUniform1i(glGetUniformLocation(program, "u_surfaces"), 6)
 	glUniform1i(glGetUniformLocation(program, "u_surfaceCount"), flatCount)
+	glUniform1i(glGetUniformLocation(program, "u_floors"), 7)
+	glUniform1i(glGetUniformLocation(program, "u_floorCount"), floorCount)
 	glUniform4f(glGetUniformLocation(program, "u_area"), area.min.x, area.min.y, area.max.x, area.max.y)
 	glUniform2f(glGetUniformLocation(program, "u_size"), float(width), float(height))
 	glUniform1f(glGetUniformLocation(program, "u_floor"), floor)

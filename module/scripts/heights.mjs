@@ -20,7 +20,9 @@
 //    "Define Surface" behavior has a surface at the bottom of its elevation range, at its top,
 //    or both, over the area of its shapes, and the behavior says whether the surface stops
 //    light, movement and sight (Scene#getSurfaces).
-//  - The floor the path traced light is shown on is the base of the level being viewed.
+//  - The path traced light is shown on the floor that is at each place: a surface that stops
+//    movement, where one lies within the viewed level, and elsewhere the ground, which is the
+//    base of the viewed level or of a lower level that is seen from it (`viewedFloors`).
 //
 // The Foundry types named here are the ones of the pf2e system's declarations
 // (github.com/foundryvtt/pf2e, types/foundry): TokenDocument in client/documents/token.d.mts,
@@ -88,6 +90,26 @@ export function floorHeight() {
 	const range = canvas.level?.elevation ?? {};
 	const base = Number.isFinite(range.base) ? range.base : range.bottom;
 	return (Number.isFinite(base) ? base : 0) * perUnit();
+}
+
+/**
+ * Between which heights the floors lie that are seen while the viewed level is viewed, in scene
+ * pixels. `ground` is the lowest floor there is to see: the base of the viewed level, or of a
+ * lower level that is visible from it (Level#visibility), since where the viewed level has no
+ * floor of its own one looks down on that one. `ceiling` is the top of the viewed level: a
+ * surface from there on up is a floor of a level above.
+ * @returns {{ground: number, ceiling: number}}
+ */
+export function viewedFloors() {
+	const level = canvas.level;
+	const base = (range) => (Number.isFinite(range?.base) ? range.base : range?.bottom);
+	let ground = said(base(level?.elevation), 0);
+	for (const id of level?.visibility?.levels ?? []) {
+		const below = base(canvas.scene?.levels?.get?.(id)?.elevation);
+		if (Number.isFinite(below)) ground = Math.min(ground, below);
+	}
+	const per = perUnit();
+	return { ground: ground * per, ceiling: said(level?.elevation?.top, Infinity) * per };
 }
 
 /**

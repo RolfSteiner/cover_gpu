@@ -31,7 +31,11 @@ Light, vision and cover are worked out in a scene that has height.
 
 What that changes:
 
-- **Light.** The picture shows the light on the floor of the viewed level. Light from a source
+- **Light.** The picture shows the light on the floor that is at each place: on a region's
+  surface that stops movement, where one lies within the viewed level (a raised floor, the roof
+  of a room below), and on the ground elsewhere, which is the base of the viewed level or of a
+  lower level seen from it. A lamp on a roof lights the roof, not the ground around the room at
+  the roof's height. Light from a source
   above a low wall falls over it, and the wall's shadow on the floor is as long as the heights
   make it; light passes under a wall that begins higher up; a roof keeps light out, or in. The
   reach of a light counts with the difference in height. A wall without a top throws light back

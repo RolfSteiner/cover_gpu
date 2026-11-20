@@ -22,7 +22,10 @@
 // token cannot see, fog of war, and what the pf2e system changes for darkvision.
 //
 // The light is traced through a scene that has height (see heights.mjs). The picture shows the
-// light on the floor of the viewed level. Each source is at its own height, a wall stops light
+// light on the floor that is at each place: on a surface of a region that stops movement, where
+// one lies within the viewed level (a raised floor, the roof of a lower room), and on the
+// ground elsewhere. A lamp that stands on such a floor lights that floor, and of the ground
+// beside it only what its light reaches down there. Each source is at its own height, a wall stops light
 // between its bottom and its top, and the surfaces of regions that stop light are floors and
 // roofs to it: light from a source above a low wall falls over it, and the wall's shadow on
 // the floor is as long as that makes it.
@@ -44,7 +47,7 @@
 // client/canvas/layers/effects/illumination-effects.d.mts, PointLightSource and its data in
 // client/canvas/sources.
 
-import { floorHeight, lightHeight } from './heights.mjs';
+import { lightHeight, viewedFloors } from './heights.mjs';
 import { value } from './settings.mjs';
 
 /** The layers of canvas.effects a light source has a mesh in. */
@@ -150,7 +153,7 @@ export class PathTracedLighting {
 
 	/**
 	 * True when the traced light at a place of the scene counts as lit: the light on the floor
-	 * there, whatever the height of what stands on it. False while there is no picture.
+	 * that is there, whatever the height of what stands on it. False while there is no picture.
 	 * @param {{x: number, y: number}} point
 	 */
 	isLit(point) {
@@ -244,9 +247,10 @@ export class PathTracedLighting {
 		if (!this.#cover || !this.#treeJson) return false;
 		const sources = value('lights') ? this.#sources().map((source) => this.#describe(source)) : null;
 		const width = value('pictureWidth');
+		const { ground, ceiling } = viewedFloors();
 		const picture = { width, height: Math.max(1, Math.round((width * this.#root.height) / this.#root.width)),
 			samples: value('samples'), bounces: value('bounces'), smoothing: value('smoothing'),
-			wallHeight: value('wallHeight') * (canvas.dimensions?.size ?? 100), antialias: value('antialias'), floor: floorHeight() };
+			wallHeight: value('wallHeight') * (canvas.dimensions?.size ?? 100), antialias: value('antialias'), floor: ground, ceiling };
 		const inputs = sources ? JSON.stringify([sources, picture, value('litLevel')]) : '';
 		if (!anyway && inputs === this.#inputs) return false;
 		this.#inputs = inputs;

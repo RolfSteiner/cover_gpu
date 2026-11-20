@@ -192,8 +192,11 @@ export const cover = {
 	 * (gamma 2.2), so it can be shown as it is; the brightest light of one source is white, and
 	 * more light than that is white too. The call returns when the picture is drawn.
 	 *
-	 * The picture shows the light on the floor of the map, which lies level at the height
-	 * `picture.floor`. Light runs through the room above it: a source is at its own height, a
+	 * The picture shows the light on the floor of the map. The ground lies level at the height
+	 * `picture.floor`. Where a surface that stops movement lies over a place, at the height of
+	 * the ground or above it and below `picture.ceiling`, the highest such surface is the floor
+	 * there: a place under a raised floor shows the light on that floor, a place beside it the
+	 * light on the ground. Light runs through the room: a source is at its own height, a
 	 * wall stops light between its bottom and its top (light passes over a low wall and under a
 	 * raised one, and the wall's shadow on the floor is as long as that makes it), and a surface
 	 * that stops light does so over its area. How far a place is from a source, for the reach of
@@ -227,7 +230,9 @@ export const cover = {
 	 *   as for `testLightAdaptive`, and `smoothing`: how many times the light the walls throw
 	 *   back is smoothed to take the noise of path tracing out of it, 0 to 6 (3 if left out;
 	 *   0 leaves the noise in). Smoothing never spreads light through a wall that stands on the
-	 *   floor. `floor`: the height of the floor the picture shows (0 if left out). `wallHeight`:
+	 *   floor. `floor`: the height of the ground (0 if left out). `ceiling`: the height below
+	 *   which a surface that stops movement is a floor of the picture (no limit if left out).
+	 *   `wallHeight`:
 	 *   up to how far above the floor a wall without a top throws light back, in map units (above
 	 *   its own bottom, where that is higher). Such a wall is lit as high up as the light of a
 	 *   source carries, and would throw all of that back down; 0, or left out, lets it.
@@ -238,7 +243,7 @@ export const cover = {
 	 *   walls that act on light, and how many triangles of surfaces that stop light took part
 	 */
 	traceLights(treeJson, lights, picture) {
-		const { width = 0, height = 0, samples = 0, bounces = 0, smoothing = 3, wallHeight = 0, antialias = 1, floor = 0 } = picture || {};
+		const { width = 0, height = 0, samples = 0, bounces = 0, smoothing = 3, wallHeight = 0, antialias = 1, floor = 0, ceiling = Infinity } = picture || {};
 		// a source whose light reaches nowhere takes no part
 		lights = lights.filter((light) => light.radius > 0);
 		if (width > 0 && height > 0 && (canvas.width !== width || canvas.height !== height)) {
@@ -259,7 +264,7 @@ export const cover = {
 		});
 		try {
 			M._test_local_gpu_lib_collect(ctx);
-			const result = M._test_local_gpu_lib_trace_lights(ctx, BigInt(pTree), BigInt(pLights), lights.length, width, height, samples, bounces, smoothing, wallHeight, antialias, floor);
+			const result = M._test_local_gpu_lib_trace_lights(ctx, BigInt(pTree), BigInt(pLights), lights.length, width, height, samples, bounces, smoothing, wallHeight, antialias, floor, Math.min(ceiling, 1e9));
 			const error = M._test_local_gpu_lib_last_error(ctx);
 			if (error) throw new Error(`test_local_gpu: ${readString(error)}`);
 			const values = parseJsonValues(readString(result));
