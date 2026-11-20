@@ -1,0 +1,11 @@
+# what build.ps1 makes
+/build/
+/module/lib/test_local_gpu_lib.mjs
+/module/lib/test_local_gpu_lib.wasm
+
+# editors
+.idea/
+.vscode/
+
+# the compiler's cache, made next to the source it compiles
+.cache/
