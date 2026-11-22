@@ -134,7 +134,7 @@ try {
 		const walls = wallsOfTree(tree);
 		const surfaces = trianglesOf(tree, 'move');
 		return targets.map(([tx, ty, bottom, top = bottom]) => {
-			const levels = top > bottom ? Math.min(Math.max(m, 1), 24) : 1;
+			const levels = Math.min(Math.max(m, 1), 24);
 			const tox = tx - source[0], toy = ty - source[1];
 			const apart = Math.hypot(tox, toy);
 			const across = apart > 0.001 ? [-toy / apart, tox / apart] : [0, 1];
@@ -149,17 +149,25 @@ try {
 				const middle = Math.atan2(ty - p.y, tx - p.x);
 				const half = Math.asin(radius / far);
 				const steps = Math.max(Math.ceil(2 * half / (0.05 * Math.PI / 180)), 1);
-				let blocked = 0;
+				// the cone of lines of sight to the target: in each direction from the lowest to the
+				// highest the target is seen at, each ray counting for the part of the cone round it
+				let whole = 0, hidden = 0;
 				for (let k = 0; k <= steps; k++) {
 					const offset = 2 * half * k / steps - half;
 					const side = far * Math.sin(offset);
-					const reach = far * Math.cos(offset) - Math.sqrt(Math.max(radius * radius - side * side, 0));
+					const inside = Math.sqrt(Math.max(radius * radius - side * side, 0));
+					const reach = far * Math.cos(offset) - inside;
+					const low = p.z < bottom ? Math.atan2(bottom - p.z, reach + 2 * inside) : Math.atan2(bottom - p.z, reach);
+					const high = p.z > top ? Math.atan2(top - p.z, reach + 2 * inside) : Math.atan2(top - p.z, reach);
+					const part = Math.max(high - low, 1e-6) / levels;
 					for (let j = 0; j < levels; j++) {
-						const h = bottom + (top - bottom) * (j + 0.5) / levels;
-						if (moveStopped(p, { x: Math.cos(middle + offset) * reach, y: Math.sin(middle + offset) * reach, z: h - p.z }, walls, surfaces)) blocked++;
+						const steep = low + (high - low) * (j + 0.5) / levels;
+						const weight = Math.cos(steep) * part;
+						whole += weight;
+						if (moveStopped(p, { x: Math.cos(middle + offset) * reach, y: Math.sin(middle + offset) * reach, z: Math.tan(steep) * reach }, walls, surfaces)) hidden += weight;
 					}
 				}
-				least = Math.min(least, blocked / ((steps + 1) * levels));
+				least = Math.min(least, whole > 0 ? hidden / whole : 0);
 			}
 			return least;
 		});
@@ -307,8 +315,15 @@ try {
 			wallWithoutHeights: [share(wall({}), [200, 400, 500], [800, 400, -300, 900]), 1],
 			// a wall that lets movement through hides nothing
 			noMoveWall: [share(wall({ move: NONE, top: 60 }), [200, 400, 60], [800, 400, 0, 60]), 0],
-			// one height only: the middle of the target, which the wall of 60 hides from an eye at 60
+			// one ray only: half way between the lowest and the highest line of sight, which here
+			// runs a little downwards and into the wall of 60, from an eye at 60
 			oneHeight: [share(wall({ top: 60 }), [200, 400, 60], [800, 400, 0, 100], 1), 1],
+			// looked down on from 300: the top of the target is seen too, and the wall of 60 hides
+			// the foot of it only
+			fromAbove: [share(wall({ top: 60 }), [200, 400, 300], [800, 400, 0, 120], 24) < 0.3 ? 0 : 1, 0],
+			// a target that is a disc on the floor, looked down on: a wall high enough hides all of it
+			discBehindAWall: [share(wall({ top: 400 }), [200, 400, 300], [800, 400, 0, 0], 6), 1],
+			discInTheOpen: [share(wall({ top: 20 }), [200, 400, 300], [800, 400, 0, 0], 6), 0],
 			// a floor between the two: seen from above, a target under it is hidden
 			throughAFloor: [share(single([], [{ z: 100, light: 1, move: 1, t: [300, 100, 900, 100, 900, 700, 300, 100, 900, 700, 300, 700] }]), [200, 400, 200], [800, 400, 0, 80]), 1],
 			// standing on that floor, another that stands on it is in full view
@@ -336,9 +351,10 @@ try {
 			const tall = gpu.testCover(flatJson, [source[0], source[1], 70], targets.map(([x, y]) => [x, y, -40, 260]), 100, 100, 3, 6);
 			before.forEach((result, t) => {
 				row.targets++;
-				if (result.obstructed === now[t].obstructed && result.points.every((q, k) => q.rays === now[t].points[k].rays && q.blocked === now[t].points[k].blocked)) row.same++;
+				if (Math.abs(result.obstructed - now[t].obstructed) < 1e-5 && result.points.every((q, k) => q.rays === now[t].points[k].rays && q.blocked === now[t].points[k].blocked)) row.same++;
 				else row.firstDifference ??= { source, target: targets[t], before: result.obstructed, now: now[t].obstructed };
-				if (Math.abs(result.obstructed - tall[t].obstructed) < 1e-6) row.sameWithHeights++;
+				// a tall target is seen a little wider where it is nearer, so the share moves a little
+				if (Math.abs(result.obstructed - tall[t].obstructed) < 0.03) row.sameWithHeights++;
 			});
 		}
 		row.ok = row.same === row.targets && row.sameWithHeights === row.targets;

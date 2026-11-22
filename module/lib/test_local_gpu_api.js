@@ -297,7 +297,8 @@ export const cover = {
 	 * How much of each of several round targets the walls hide from a round source.
 	 *
 	 * A target is an upright cylinder: a circle on the map, from its bottom up to its top. What
-	 * is hidden of it is a share of what the source sees of it, its width by its height.
+	 * is hidden of it is a share of what a point of the source sees of it: of the cone of all
+	 * lines of sight from that point to the target.
 	 *
 	 * Only walls and surfaces that stop movement hide anything: an object of the tree whose
 	 * `w.move` is 0 (Foundry's value for a wall that lets movement through, and for an open door)
@@ -308,31 +309,35 @@ export const cover = {
 	 *
 	 * For each target, the source is looked from at `points` points, spread evenly along its
 	 * diameter that lies across the line from source to that target (the first point is one end
-	 * of that diameter, the last the other), all at the height of `source`. From each point, the
-	 * sector between the two directions that just touch the target circle is swept in directions
-	 * at most 0.05 degrees apart, and in each direction the target is looked at at `heights`
-	 * heights, spread evenly from its bottom to its top. A ray that a wall or a surface stops
-	 * before it reaches the target counts as blocked.
+	 * of that diameter, the last the other), all at the height of `source`. From each point the
+	 * target fills a cone of lines of sight. On the map the cone lies between the two directions
+	 * that just touch the target circle, and it is swept in directions at most 0.05 degrees
+	 * apart. In each direction the target is seen from a lowest to a highest line of sight: from
+	 * its bottom to its top, and over its top onto the far edge where the point looks down on it.
+	 * Between those two, `heights` rays are spread evenly by angle. A ray that a wall or a surface
+	 * stops before it reaches the target counts as blocked, and it counts for as much of the
+	 * cone as lies round it.
 	 *
 	 * @param {string} treeJson
 	 * @param {[number, number, number]} source centre of the source, at the height it looks from
 	 * @param {[number, number, number, number?][]} targets per target the centre on the map, its
-	 *   bottom and its top; a target without a top is flat, and is looked at at its one height
+	 *   bottom and its top; a target without a top is flat, a disc at its one height
 	 * @param {number} sourceDiameter in map units
 	 * @param {number} targetDiameter of every target, in map units
 	 * @param {number} points how many points of the source to look from (at least 1)
-	 * @param {number} [heights] at how many heights to look at a target, 1 to 24 (1 if left out,
-	 *   which is the middle of the target)
+	 * @param {number} [heights] how many rays to send up and down in each direction, 1 to 24 (1
+	 *   if left out, which is the line of sight half way between the lowest and the highest)
 	 * @returns {{ target: object, top: number, heights: number, lineA: object, lineB: object, obstructed: number, points: object[] }[]}
 	 *   one result per target, in the order of `targets`. `target`: its centre, at its bottom;
-	 *   `top`: its top; `heights`: at how many heights it was looked at; `lineA` and `lineB`:
+	 *   `top`: its top; `heights`: how many rays were sent up and down; `lineA` and `lineB`:
 	 *   the ends of the source's diameter used for it; `obstructed`: the smallest share of the
 	 *   target that any of the points cannot see, 0 to 1; `points`: per point `at`, `rayA` and
 	 *   `rayB` (the two touching rays, on the map), `rays` (sent), `blocked` (stopped),
-	 *   `obstructed` (blocked / rays) and `runs`: stretches of neighbouring directions in which
-	 *   the same heights are blocked, each `{ blocked, share, mask, from, to }`: `mask` has one
-	 *   bit per height, the lowest first, set where that height is hidden; `share` is the blocked
-	 *   share of the heights (`blocked` is true for all of them); `from` and `to` are on the
+	 *   `obstructed` (the share of the cone the blocked rays stand for) and `runs`: stretches
+	 *   of neighbouring directions in which the same rays are blocked, each
+	 *   `{ blocked, share, mask, from, to }`: `mask` has one bit per ray of a direction, the
+	 *   lowest first, set where that ray is stopped; `share` is what the blocked rays stand for
+	 *   in the first direction (`blocked` is true when all are); `from` and `to` are on the
 	 *   target circle
 	 */
 	testCover(treeJson, source, targets, sourceDiameter, targetDiameter, points, heights = 1) {

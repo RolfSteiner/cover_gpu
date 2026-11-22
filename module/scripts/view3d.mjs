@@ -18,9 +18,9 @@
 //  - What has a height is drawn standing, from what the layer knows of it (see layer.mjs): the
 //    walls from their bottom to their top, every token as a cylinder from its feet to its head,
 //    and, with the GM's view shown, the other surfaces, the traced lights at their heights and
-//    the cover test. The cover test runs from where the selected token looks from to each other
-//    token: what of that token's side is hidden and what is seen, height by height, and the
-//    lines of sight to it.
+//    the cover test. The cover test is a cone of lines of sight from where the selected token
+//    looks from to each other token: where the cone ends on that token, what of it is hidden
+//    and what is seen.
 //  - The image only holds the part of the scene that Foundry's own view shows. So Foundry's
 //    view is moved here, out of sight, to wherever the camera looks: to the part of the ground
 //    the camera sees, as large as the screen lets it be (`#follow`).
@@ -716,43 +716,80 @@ export class View3D {
 			}
 		}
 
-		// The cover test. For each target, the part of its side the source looks at, in slices
-		// one above the other and stretch by stretch round it: red where the walls hide it,
-		// yellow where it is seen. And the lines of sight to it, as faint sheets from where the
-		// source looks from to each slice.
+		// The cover test. From where the source looks from, each target fills a cone of lines of
+		// sight: on the map between the two directions that just touch it, and in each direction
+		// from the lowest to the highest it is seen at (the same as the script works out, see
+		// seenBetween in the script). The cone is drawn where it ends on the target, stretch by
+		// stretch round it and part by part up it: red where the walls stop the line of sight
+		// before it gets there, yellow where it gets there. Faint sheets from where the source
+		// looks from show the lines of sight, and four lines the corners of the cone.
 		for (const test of scene.cover) {
-			const { eye, centre, radius } = test;
+			const { eye, centre, radius, bottom, top } = test;
 			line(test.line[0], test.line[1], INK, 0.9);
 			const count = Math.max(test.heights, 1);
-			const high = (test.top - test.bottom) / count;
-			// a little off the side of the cylinder, so that it lies on it and not in it
-			const out = radius * 1.03 + 1;
-			const round = (turn, z) => [centre.x + Math.cos(turn) * out, centre.y + Math.sin(turn) * out, z];
+			// The look in a direction, told by where round the target it enters the target's circle:
+			// how far that is on the map, and from how low to how high the target is seen there.
+			const look = (turn) => {
+				const dx = centre.x + Math.cos(turn) * radius - eye[0];
+				const dy = centre.y + Math.sin(turn) * radius - eye[1];
+				const near = Math.hypot(dx, dy) || 1;
+				const ux = dx / near;
+				const uy = dy / near;
+				// how far the look runs on inside the circle
+				const away = near + Math.max(0, -2 * radius * (ux * Math.cos(turn) + uy * Math.sin(turn)));
+				return { turn, near, ux, uy,
+					low: eye[2] < bottom ? Math.atan2(bottom - eye[2], away) : Math.atan2(bottom - eye[2], near),
+					high: eye[2] > top ? Math.atan2(top - eye[2], away) : Math.atan2(top - eye[2], near) };
+			};
+			// Where the line of sight of a look meets the target, `part` of the way from the lowest
+			// to the highest: on its side, or on its top or bottom. A little off the target, so
+			// that what is drawn there lies on it and not in it.
+			const meets = (seen, part) => {
+				const rise = Math.tan(seen.low + (seen.high - seen.low) * part);
+				const z = eye[2] + rise * seen.near;
+				if (z > top && rise < 0) {
+					const run = (top - eye[2]) / rise;
+					return [eye[0] + seen.ux * run, eye[1] + seen.uy * run, top + 1];
+				}
+				if (z < bottom && rise > 0) {
+					const run = (bottom - eye[2]) / rise;
+					return [eye[0] + seen.ux * run, eye[1] + seen.uy * run, bottom - 1];
+				}
+				const out = radius * 1.03 + 1;
+				return [centre.x + Math.cos(seen.turn) * out, centre.y + Math.sin(seen.turn) * out, clamp(z, bottom, top)];
+			};
+			let first = null;
+			let last = null;
 			for (const run of test.runs) {
 				const from = Math.atan2(run.from.y - centre.y, run.from.x - centre.x);
 				let span = Math.atan2(run.to.y - centre.y, run.to.x - centre.x) - from;
 				while (span > Math.PI) span -= 2 * Math.PI;
 				while (span <= -Math.PI) span += 2 * Math.PI;
 				const steps = Math.max(1, Math.ceil(Math.abs(span) / (Math.PI / 14)));
+				const looks = Array.from({ length: steps + 1 }, (_, s) => look(from + (span * s) / steps));
+				first ??= looks[0];
+				last = looks[steps];
 				for (let j = 0; j < count; j++) {
 					const color = (run.mask >> j) & 1 ? HIDDEN : SEEN;
-					const z0 = test.bottom + high * j;
-					const z1 = z0 + high;
-					const half = (z0 + z1) / 2;
-					piece(round(from + span / 2, half), (list) => {
+					const lower = j / count;
+					const upper = (j + 1) / count;
+					const half = (lower + upper) / 2;
+					const middle = meets(looks[steps >> 1], half);
+					piece(middle, (list) => {
 						for (let s = 0; s < steps; s++) {
-							const a = from + (span * s) / steps;
-							const b = from + (span * (s + 1)) / steps;
-							if (high > 0) {
-								triangle(list, round(a, z0), round(b, z0), round(b, z1), color, 0.7);
-								triangle(list, round(a, z0), round(b, z1), round(a, z1), color, 0.7);
-							}
+							const corners = [meets(looks[s], lower), meets(looks[s + 1], lower), meets(looks[s + 1], upper), meets(looks[s], upper)];
+							triangle(list, corners[0], corners[1], corners[2], color, 0.7);
+							triangle(list, corners[0], corners[2], corners[3], color, 0.7);
 						}
 					});
-					piece([(eye[0] + centre.x) / 2, (eye[1] + centre.y) / 2, (eye[2] + half) / 2], (list) => triangle(list, eye, round(from, half), round(from + span, half), color, 0.1));
-					if (!(high > 0)) line(round(from, half), round(from + span, half), color);
+					const ends = [meets(looks[0], half), meets(looks[steps], half)];
+					piece(eye.map((v, i) => (v + middle[i]) / 2), (list) => triangle(list, eye, ends[0], ends[1], color, 0.1));
+					// a stretch of one direction, or a target seen edge on, has no area to show
+					line(meets(looks[0], lower), meets(looks[0], upper), color, 0.6);
+					line(ends[0], ends[1], color, 0.35);
 				}
 			}
+			if (first) for (const [seen, part] of [[first, 0], [first, 1], [last, 0], [last, 1]]) line(eye, meets(seen, part), INK, 0.45);
 		}
 
 		// a traced light: a small square that faces the camera, on a stem down to the lowest floor

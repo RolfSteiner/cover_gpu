@@ -50,7 +50,8 @@ let BATCH_WIDTH = 1024
 // The bottom of a wall that names none is this far down, its top this far up.
 let BIG = 1000000000.0
 
-// test_cover looks at a target at this many heights at most: one bit each of what comes back.
+// test_cover sends this many rays up and down in one direction at most: one bit each of what
+// comes back.
 let MOST_HEIGHTS = 24
 
 // Vertex stage of every program: one triangle that covers the whole target, so that the
@@ -187,17 +188,19 @@ void main() \{
 \}
 "
 
-// One pixel per direction of test_cover. A direction is two pixels of u_rays: where the look
-// sets off (x, y, z) and the bottom of the target, then how far the look runs on the map to
-// reach the target (x, y), the top of the target and at how many heights the target is looked
-// at. Those heights are spread evenly from the target's bottom to its top (the middle of as
-// many equal slices), and to each of them runs one ray from where the look sets off.
+// One pixel per direction of test_cover. A direction is a direction on the map, in which the
+// target is seen from a lowest to a highest line of sight; between those two the lines of sight
+// to the target fan out up and down. It is two pixels of u_rays: where the look sets off (x, y,
+// z) and how steeply the lowest line of sight runs, as an angle up from level; then how far the
+// look runs on the map to reach the target (x, y), how steeply the highest line of sight runs,
+// and how many rays are sent. The rays are spread evenly by angle from the lowest to the
+// highest (the middle of as many equal parts), all from where the look sets off.
 //
-// What is written is one bit per height, the lowest height first: set when a wall or a flat
-// surface stops the ray to that height. A wall stops it when the ray, seen from above, crosses
-// the wall's line, from a side the wall acts from, and is no lower than the wall's bottom and
-// no higher than its top where it crosses. Seen from above the rays of one direction are one
-// and the same, so the walls are gone through once per direction, not once per ray.
+// What is written is one bit per ray, the lowest ray first: set when a wall or a flat surface
+// stops that ray before it reaches the target. A wall stops it when the ray, seen from above,
+// crosses the wall's line, from a side the wall acts from, and is no lower than the wall's
+// bottom and no higher than its top where it crosses. Seen from above the rays of one direction
+// are one and the same, so the walls are gone through once per direction, not once per ray.
 let COVER_SOURCE = "
 uniform sampler2D u_rays;
 void main() \{
@@ -208,6 +211,8 @@ void main() \{
 	vec3 level = vec3(two.xy, 0.0);
 	int heights = int(two.w);
 	float slice = (two.z - one.w) / float(max(heights, 1));
+	// how far the look runs on the map to the target: a ray's rise over that run is its own
+	float far = length(two.xy);
 	int mask = 0;
 	for (int i = 0; i < u_count; i++) \{
 		if (!hitsBox(o, level, texelFetch(u_entries, ivec2(0, i), 0), vec2(-BIG, BIG))) continue;
@@ -218,14 +223,14 @@ void main() \{
 		vec4 more = texelFetch(u_entries, ivec2(3, i), 0);
 		if (letsThrough(level.xy, wall, more.x)) continue;
 		for (int j = 0; j < heights; j++) \{
-			float z = o.z + (one.w + slice * (float(j) + 0.5) - o.z) * at;
+			float z = o.z + tan(one.w + slice * (float(j) + 0.5)) * far * at;
 			if (z >= more.y && z <= more.z) mask |= 1 << j;
 		\}
 	\}
 	for (int i = 0; i < u_surfaceCount; i++) \{
 		for (int j = 0; j < heights; j++) \{
 			float at;
-			if (hitsSurface(o, vec3(two.xy, one.w + slice * (float(j) + 0.5) - o.z), i, at)) mask |= 1 << j;
+			if (hitsSurface(o, vec3(two.xy, tan(one.w + slice * (float(j) + 0.5)) * far), i, at)) mask |= 1 << j;
 		\}
 	\}
 	o_color = vec4(float(mask & 255), float((mask >> 8) & 255), float((mask >> 16) & 255), 255.0) / 255.0;
@@ -877,8 +882,8 @@ def trace_lights(var treeS:string; lights:float4?; count:int; width:int; height:
 // y), its bottom (z) and its top (w); ds and da are the diameters of the source and of every
 // target, in map units. Returns one result per target, in the order of the targets.
 //
-// A target is an upright cylinder, and what is hidden of it is a share of what the source sees
-// of it: its width, between the two lines of sight that just touch it, by its height.
+// A target is an upright cylinder, and what is hidden of it is a share of what a point of the
+// source sees of it: of the cone of all lines of sight from the point to the target.
 //
 // Only walls and flat surfaces that stop movement hide anything, a wall between its bottom and
 // its top, and a one-way wall hides only what is looked at from the side it acts from (see
@@ -887,13 +892,16 @@ def trace_lights(var treeS:string; lights:float4?; count:int; width:int; height:
 // For each target, the source is looked from at n points, spread evenly along its diameter
 // that lies across the line from source to target: the first point is one end of that
 // diameter, the n-th the other (n = 1 looks from the first end only). From each point the
-// target fills the sector between the two directions that just touch its circle. That sector
-// is swept in directions at most 0.05 degrees apart, and in each direction the target is
-// looked at at m heights, spread evenly from its bottom to its top (m is 1 to MOST_HEIGHTS; a
-// target as high as it is low is looked at at that one height). A ray runs from the point to
-// where its direction reaches the circle, at each of those heights, and a ray that a wall or a
-// surface stops counts as blocked. The share of blocked rays is how much of the target that
-// point cannot see; a target's own figure is the smallest share among its points.
+// target fills a cone of lines of sight. On the map, the cone lies between the two directions
+// that just touch the target's circle, and it is swept in directions at most 0.05 degrees
+// apart. In each direction the target is seen from a lowest to a highest line of sight (see
+// seenBetween): from its bottom to its top, and over the top onto its far edge where the point
+// looks down on it. Between those two, m rays are spread evenly by angle (m is 1 to
+// MOST_HEIGHTS). A ray runs from the point until it reaches the target, and a ray that a wall
+// or a surface stops before that counts as blocked. Each ray stands for a part of the cone, as
+// much of what the point sees as lies round it, and the share of the cone the blocked rays
+// stand for is how much of the target that point cannot see. A target's own figure is the
+// smallest share among its points.
 //
 // The directions of every point of every target go to the graphics card in one batch.
 [export]
@@ -918,21 +926,39 @@ def test_cover(var treeS:string; var source:float3; targets:float4?; count:int; 
 	for cover in covers
 		var least = 1.0
 		for point in cover.points
+			// what the rays of the point stand for together, and what the blocked ones do
+			var whole = 0.0lf
+			var hidden = 0.0lf
 			for k in range(point.rays / cover.heights)
 				let mask = masks[next] & ((1 << cover.heights) - 1)
 				let stopped = bitsOf(mask, cover.heights)
 				let end = float3(rays[next * 2].x + rays[next * 2 + 1].x, rays[next * 2].y + rays[next * 2 + 1].y, cover.target.z)
+				// A ray stands for the part of the cone round it: as wide as the directions are apart,
+				// which is the same for all, as high as the rays of its direction are apart, and less
+				// the steeper it runs, as directions lie closer together towards straight up or down.
+				let low = rays[next * 2].w
+				let high = rays[next * 2 + 1].z
+				let part = max(high - low, 0.000001) / float(cover.heights)
+				var all = 0.0
+				var gone = 0.0
+				for j in range(cover.heights)
+					let weight = cos(low + (high - low) * (float(j) + 0.5) / float(cover.heights)) * part
+					all += weight
+					if ((mask >> j) & 1) != 0
+						gone += weight
 				next ++
 				point.blocked += stopped
-				let share = float(stopped) / float(cover.heights)
-				// neighbouring directions in which the same heights are blocked are kept as one run
+				whole += double(all)
+				hidden += double(gone)
+				let share = all > 0.0 ? gone / all : 0.0
+				// neighbouring directions in which the same rays are blocked are kept as one run
 				let last = length(point.runs) - 1
 				if last >= 0 && point.runs[last].mask == mask
 					point.runs[last].to = end
 				else
 					push(point.runs, CoverRun(blocked = stopped == cover.heights, share = share, mask = mask, from = end, to = end))
-			if point.rays > 0
-				point.obstructed = float(point.blocked) / float(point.rays)
+			if whole > 0.0lf
+				point.obstructed = float(hidden / whole)
 			least = min(least, point.obstructed)
 		cover.obstructed = least
 	return sprint_json(covers, false)
@@ -952,7 +978,7 @@ def coverOf(source: float3; target: float4; ds: float; da: float; n: int; m: int
 	var cover: Cover
 	cover.target = float3(target.x, target.y, target.z)
 	cover.top = target.w
-	cover.heights = target.w > target.z ? clamp(m, 1, MOST_HEIGHTS) : 1
+	cover.heights = clamp(m, 1, MOST_HEIGHTS)
 	let toTarget = float2(target.x - source.x, target.y - source.y)
 	let apart = length(toTarget)
 	// with source and target in one place no direction is across; any will do
@@ -988,13 +1014,27 @@ def coverFrom(p: float3; target: float4; radius: float; heights: int; var rays: 
 	let steps = max(int(ceil(2.0 * half / (0.05 * PI / 180.0))), 1)
 	for k in range(steps + 1)
 		let offset = 2.0 * half * float(k) / float(steps) - half
-		// how far along this direction the target circle begins
+		// how far along this direction the target circle begins, and how far it goes on inside it
 		let side = apart * sin(offset)
-		let far = apart * cos(offset) - sqrt(max(radius * radius - side * side, 0.0))
-		push(rays, float4(p.x, p.y, p.z, target.z))
-		push(rays, float4(cos(middle + offset) * far, sin(middle + offset) * far, target.w, float(heights)))
+		let inside = sqrt(max(radius * radius - side * side, 0.0))
+		let far = apart * cos(offset) - inside
+		let seen = seenBetween(p.z, far, far + 2.0 * inside, target.z, target.w)
+		push(rays, float4(p.x, p.y, p.z, seen.x))
+		push(rays, float4(cos(middle + offset) * far, sin(middle + offset) * far, seen.y, float(heights)))
 	point.rays = (steps + 1) * heights
 	return <- point
+
+// Between which two lines of sight an upright cylinder is seen in one direction on the map,
+// each as the angle it runs up from level (down is below 0): x the lowest, y the highest. The
+// look sets off at the height `eye`; in its direction the cylinder begins `near` away on the
+// map and ends `away` away, and it stands from `bottom` to `top`. From the side it is seen
+// from its bottom to its top, where it begins. From above its top is seen too, and the highest
+// line of sight is the one to the far edge of the top; from below, the lowest is the one to
+// the far edge of its bottom.
+def seenBetween(eye, near, away, bottom, top: float) : float2
+	let low = eye < bottom ? atan2(bottom - eye, away) : atan2(bottom - eye, near)
+	let high = eye > top ? atan2(top - eye, away) : atan2(top - eye, near)
+	return float2(low, high)
 
 // The tree and the flat surfaces in treeS, in the form the rest of the script works on. treeS
 // is a JSON object with the nodes of the tree in `nodes`, the place of the root among them in
@@ -1622,11 +1662,11 @@ struct Shadow
 	rayB: Ray
 	area: array<float3>
 
-// A stretch of neighbouring directions of test_cover in which the same heights of the target
-// are blocked: `mask` has one bit per height the target is looked at, the lowest height first,
-// set where the ray to that height is stopped. `share` is how many of them that is, from none
-// (0) to all (1, for which `blocked` is set). from and to are where its first and its last
-// direction meet the target circle.
+// A stretch of neighbouring directions of test_cover in which the same rays are blocked: `mask`
+// has one bit per ray of a direction, the lowest ray first, set where that ray is stopped.
+// `share` is how much of what the rays of its first direction stand for the blocked ones do,
+// from nothing (0) to all (1; `blocked` is set when every ray is blocked). from and to are
+// where its first and its last direction meet the target circle.
 struct CoverRun
 	blocked: bool
 	share: float
@@ -1646,8 +1686,8 @@ struct CoverPoint
 	obstructed: float
 	runs: array<CoverRun>
 
-// What test_cover returns for one target: its centre at its bottom, its top, at how many
-// heights it was looked at, the ends of the source's diameter that lies across the line to it,
+// What test_cover returns for one target: its centre at its bottom, its top, how many rays
+// were sent up and down in each direction, the ends of the source's diameter that lies across the line to it,
 // the smallest share of the target any of the points cannot see, and each point's result.
 struct Cover
 	target: float3

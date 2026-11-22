@@ -45,9 +45,11 @@ What that changes:
   with the walls and surfaces of every level in the way. A wall that names levels ends, for
   the light, where those levels end. Light passes from one level to another wherever no
   surface or wall stops it, so a floor between two levels needs a region that defines one.
-- **Cover.** The cover test looks from the height the token looks from at the other token from
-  its feet to its head (setting "Cover test: heights"). A low wall hides the lower part of what
-  stands behind it, a floor hides what is under it from above.
+- **Cover.** From the height a token looks from, another token fills a cone of lines of sight:
+  from side to side of it, and from its feet to its head, with its top where it is looked down
+  on. The cover test sends rays all through that cone (setting "Cover test: rays up and down"),
+  and the hidden share is the part of the cone the walls and floors cut off. A low wall hides
+  the lower part of what stands behind it, a floor hides what is under it from above.
 - **Vision.** A token sees another over or under the walls between them where the straight line
   from its eyes to the other clears them. A mirror is as high as its wall. Foundry's own views
   (what of the map a token reveals) stay flat shapes, worked out by Foundry and Wall Height.
@@ -67,8 +69,8 @@ traced light at its height. Token and tile art stays flat on the map.
   every level of the scene at once: Foundry's flat picture is laid on the floors of the viewed
   level and on the tokens Foundry has drawn; the floors of the other levels are drawn in the
   level's own picture or color, lit by the light path traced for them, with their walls and
-  their tokens. The cover test is drawn through the room: on each target's side what is hidden
-  (red) and what is seen (yellow), height by height, with the lines of sight to it. Foundry's
+  their tokens. The cover test is drawn as the cone it is: where it ends on each target, what
+  is hidden (red) and what is seen (yellow), with the lines of sight to it. Foundry's
   HUD is hidden while the view is on.
 
 ## Layout
