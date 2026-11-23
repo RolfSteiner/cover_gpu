@@ -11,7 +11,9 @@ Foundry module.
 .PARAMETER Daslang
 The daslang checkout. It has to hold bin\Release\daslang.exe and the wasm64 build of the OpenGL
 module, web\output64\lib\liblibDasModuleOpenGL.a. Default: the environment variable
-DASLANG_ROOT, or G:\Packages\daslang.
+DASLANG_ROOT; without it the submodule `daslang` of this repository, once it has been built;
+without that G:\Packages\daslang. The script warns when the checkout is not at the commit the
+submodule names.
 
 .PARAMETER Emsdk
 The emscripten SDK, whose emsdk_env.ps1 puts its tools on the path. Default: the environment
@@ -29,7 +31,7 @@ folder cover-quadtree-view there (the id of the module, which Foundry wants the 
 .\build.ps1 -Install G:\Programming\Foundry\foundrydata\Data\modules
 #>
 param(
-	[string]$Daslang = $(if ($env:DASLANG_ROOT) { $env:DASLANG_ROOT } else { 'G:\Packages\daslang' }),
+	[string]$Daslang = '',
 	[string]$Emsdk = $(if ($env:EMSDK) { $env:EMSDK } else { 'G:\Packages\emsdk' }),
 	[string]$Install = ''
 )
@@ -39,12 +41,29 @@ $root = $PSScriptRoot
 $name = 'test_local_gpu_lib'
 $moduleId = 'cover-quadtree-view'
 
+if (-not $Daslang) {
+	$own = Join-Path $root 'daslang'
+	$Daslang = if ($env:DASLANG_ROOT) { $env:DASLANG_ROOT }
+		elseif (Test-Path (Join-Path $own 'bin\Release\daslang.exe')) { $own }
+		else { 'G:\Packages\daslang' }
+}
+
 $compiler = Join-Path $Daslang 'bin\Release\daslang.exe'
 $openGL = Join-Path $Daslang 'web\output64\lib\liblibDasModuleOpenGL.a'
 $emsdkEnv = Join-Path $Emsdk 'emsdk_env.ps1'
 foreach ($needed in $compiler, $openGL, $emsdkEnv) {
 	if (-not (Test-Path $needed)) { throw "Not found: $needed. See the parameters -Daslang and -Emsdk (Get-Help .\build.ps1)." }
 }
+
+# The commit of daslang this repository names (its submodule) against the one that is used.
+# A checkout that git cannot read is not compared.
+try {
+	$named = ((git -C $root ls-tree HEAD daslang) -split '\s+')[2]
+	$used = git -C $Daslang rev-parse HEAD
+	if ($named -and $used -and $named -ne $used) {
+		Write-Warning "daslang in $Daslang is at $($used.Substring(0, 10)); this repository names $($named.Substring(0, 10)) (submodule daslang)."
+	}
+} catch {}
 
 # emscripten's tools on the path, for the link step daslang runs
 $env:EMSDK_QUIET = '1'

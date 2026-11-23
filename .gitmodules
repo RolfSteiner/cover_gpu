@@ -1,0 +1,4 @@
+[submodule "daslang"]
+	path = daslang
+	url = https://github.com/RolfSteiner/daScript.git
+	branch = master

@@ -82,6 +82,7 @@ traced light at its height. Token and tile art stays flat on the map.
 | `module/lib/test_local_gpu_api.js` | The JavaScript wrapper over the built library. |
 | `module/scripts/` | The module's own code; each file says at its top what it is for. |
 | `build.ps1` | Builds the library into `module/lib` and can install the module. |
+| `daslang/` | The daslang the library is built with: a git submodule, the fork [RolfSteiner/daScript](https://github.com/RolfSteiner/daScript) at a fixed commit. |
 | `test/` | Two pages that check the library and the module in a browser, without Foundry running. |
 
 The built library (`module/lib/test_local_gpu_lib.mjs` and `.wasm`, about 10 MB) is not kept in
@@ -91,8 +92,7 @@ the repository. A fresh checkout has to be built before the module works.
 
 Needed:
 
-- a daslang checkout with `bin\Release\daslang.exe` and the wasm64 build of its OpenGL module,
-  `web\output64\lib\liblibDasModuleOpenGL.a`;
+- daslang, built (below);
 - the emscripten SDK (emsdk);
 - Windows PowerShell.
 
@@ -100,9 +100,36 @@ Needed:
 .\build.ps1
 ```
 
-The script looks for daslang in `%DASLANG_ROOT%` or `G:\Packages\daslang`, and for emsdk in
-`%EMSDK%` or `G:\Packages\emsdk`; `-Daslang` and `-Emsdk` name other places. `Get-Help
-.\build.ps1` shows all of it.
+The script looks for daslang in `%DASLANG_ROOT%`, then in the submodule `daslang` if it has
+been built, then in `G:\Packages\daslang`; and for emsdk in `%EMSDK%` or `G:\Packages\emsdk`.
+`-Daslang` and `-Emsdk` name other places. `Get-Help .\build.ps1` shows all of it.
+
+### daslang
+
+The library needs a daslang whose `-lib` build for `wasm64-unknown-emscripten` goes on from
+the object to an ES module (`.mjs` and `.wasm`). That is in the fork
+[RolfSteiner/daScript](https://github.com/RolfSteiner/daScript), on its `master`; the
+repository names the commit it is built with as the submodule `daslang`. To get it with the
+repository:
+
+```powershell
+git clone --recurse-submodules <url of this repository>
+```
+
+or, in a checkout that is there already, `git submodule update --init`. A daslang checkout
+kept elsewhere does as well; `build.ps1` warns when it is not at the commit the submodule
+names.
+
+Two builds of that checkout are needed, both described in its own documentation
+(`web/README.md` for the second):
+
+- the compiler with the module dasLLVM, `bin\Release\daslang.exe`:
+  `cmake -B build -DDAS_LLVM_DISABLED=OFF`, then `cmake --build build --config Release`;
+- the wasm64 archives of the runtime and of the OpenGL module, in `web\output64\lib`
+  (`liblibDasModuleOpenGL.a` among them): with emsdk's tools on the path,
+  `emcmake cmake -S web -B web/cmake_temp -G Ninja -DCMAKE_BUILD_TYPE=Release
+  -DDAS_WASM_MEMORY64=ON -DDAS_WEB_OUTPUT_DIR=<checkout>/web/output64`, then
+  `cmake --build web/cmake_temp --target libDaScript_runtime libDasModuleOpenGL`.
 
 To build and put the module into a Foundry data folder in one go:
 
