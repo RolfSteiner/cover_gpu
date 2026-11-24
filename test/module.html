@@ -17,6 +17,11 @@ window.cancelAnimationFrame = (id) => clearTimeout(id);
 // sets a scene up and leaves handles in window.h; checks are run against those from the
 // browser's console. window.done turns true when the scene is ready, window.report says how
 // that went.
+//
+// The module is the one of this repository, or, with `?module=<address>` after the address of
+// the page, the one served there: /before/module for an earlier state of the repository (see
+// server.mjs), which scenario.mjs compares this one against.
+const moduleRoot = new URLSearchParams(location.search).get('module') ?? '/module';
 const out = document.getElementById('out');
 window.done = false;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -33,7 +38,7 @@ window.Hooks = {
 	once: (name, fn) => { (hooks[name] ??= []).push(fn); },
 	callAll: (name, ...args) => { for (const fn of hooks[name] || []) fn(...args); },
 };
-const strings = (await (await fetch('/module/lang/en.json')).json());
+const strings = (await (await fetch(`${moduleRoot}/lang/en.json`)).json());
 const lookup = (key) => key.split('.').reduce((o, k) => (o && typeof o === 'object' ? o[k] : undefined), strings);
 const missing = new Set();
 const localize = (key) => { const v = lookup(key); if (typeof v !== 'string') { missing.add(key); return key; } return v; };
@@ -403,7 +408,7 @@ try {
 
 	// the classes Foundry makes canvas.effects and canvas.visibility of, where a wrapper goes
 	CONFIG.Canvas.groups = { effects: { groupClass: Effects }, visibility: { groupClass: Visibility } };
-	await import('/module/scripts/main.mjs');
+	await import(`${moduleRoot}/scripts/main.mjs`);
 	Hooks.callAll('init');
 	Hooks.callAll('setup');
 	const { layerClass, group } = CONFIG.Canvas.layers.coverView;
@@ -429,7 +434,7 @@ try {
 	};
 	const frame = () => sleep(60);
 	// the address the module loaded the library by, so that it is the same instance
-	const libraryAddress = () => performance.getEntriesByType('resource').map((entry) => entry.name).filter((name) => name.includes('/module/lib/test_local_gpu_api.js')).pop() ?? '/module/lib/test_local_gpu_api.js';
+	const libraryAddress = () => performance.getEntriesByType('resource').map((entry) => entry.name).filter((name) => name.includes(`${moduleRoot}/lib/test_local_gpu_api.js`)).pop() ?? `${moduleRoot}/lib/test_local_gpu_api.js`;
 	window.h = {
 		layer, controls, quadtree, insert, makeWall, sleep, notes, missing, stored, unique, tokens, makeToken, drawTokens, mouse, frame,
 		surfaces, makeSurface, sceneDocument,

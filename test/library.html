@@ -5,9 +5,9 @@
 <pre id="out" style="margin:0;padding:8px">running</pre>
 <div id="pictures" style="padding:8px"></div>
 <script type="module">
-// Checks of the built library (module/lib) against answers worked out here in plain JavaScript,
-// and, where a map without heights has to give what it always gave, against an earlier build
-// (served under /old/, see server.mjs). The outcome is on the page and in window.report;
+// Checks of the built library (module/lib) against answers worked out here in plain JavaScript
+// (and, for lines of sight and mirrors, in reference.mjs), and, where a map without heights has
+// to give what it always gave, against an earlier build (served under /old/, see server.mjs). The outcome is on the page and in window.report;
 // window.done turns true at the end. A check passes when its row says ok: true.
 const out = document.getElementById('out');
 const report = { stage: 'loading' };
@@ -536,6 +536,312 @@ try {
 			&& row.thrownBackWithoutATop >= row.thrownBackWithoutATopUpTo200 && row.thrownBackWithoutATopUpTo200 > row.thrownBackByAWallOf40
 			&& row.thrownBackWithoutBounces === 0 && row.thrownBackUnderARoof > row.thrownBackByAWallOf40;
 		report.thrownBack = row;
+	}
+	// --- H: lines of sight and mirrors, against the reference -------------------------------
+	{
+		const reference = await import(`/test/reference.mjs${stamp}`);
+		// every wall of the real map once, with what it does to sight, its heights and its faces
+		const sightWalls = wallsOfTree(plain).map((wall, number) => {
+			const sight = pick([NONE, LIMITED, NORMAL, NORMAL, NORMAL, NORMAL, PROXIMITY, DISTANCE]);
+			const said = heights();
+			const mirror = () => (random() < 0.3 ? 1 : random());
+			return { id: `wall${number}`, ax: wall.ox, ay: wall.oy, bx: wall.ox + wall.dx, by: wall.oy + wall.dy, sight, dir: pick([0, 0, 0, 1, 2]), threshold: sight >= PROXIMITY ? 300 + Math.round(random() * 900) : 0,
+				bottom: said.bottom ?? -Infinity, top: said.top ?? Infinity, metallicLeft: mirror(), smoothnessLeft: 1, metallicRight: mirror(), smoothnessRight: random() < 0.8 ? 1 : 0.5 };
+		});
+		const sightSurfaces = someSurfaces().filter((surface) => surface.light);
+		const rect = { x: b.x, y: b.y, width: b.width, height: b.height };
+		const flat = gpu.setSight(sightWalls, sightSurfaces, rect);
+		// the reference takes the faces that mirror as two switches, and the sides of the map as walls
+		const asBefore = sightWalls.map((wall) => ({ ...wall, left: wall.metallicLeft >= 0.99 && wall.smoothnessLeft >= 0.99, right: wall.metallicRight >= 0.99 && wall.smoothnessRight >= 0.99 }));
+		const corners = [[b.x, b.y], [b.x + b.width, b.y], [b.x + b.width, b.y + b.height], [b.x, b.y + b.height]];
+		corners.forEach(([ax, ay], i) => asBefore.push({ id: `side${i}`, ax, ay, bx: corners[(i + 1) % 4][0], by: corners[(i + 1) % 4][1], sight: NORMAL, dir: 0, threshold: 0, bottom: -Infinity, top: Infinity, left: false, right: false }));
+		const spot = () => { const [x, y] = place(); return { x, y, z: Math.round(random() * 350) }; };
+
+		const straight = { asked: 4000, clear: 0, wrong: 0 };
+		for (let i = 0; i < straight.asked; i++) {
+			const p = spot();
+			const q = random() < 0.2 ? { ...spot(), z: p.z } : spot();
+			const expected = !reference.stopped(p, q, asBefore, sightSurfaces);
+			if (expected) straight.clear++;
+			if (gpu.sees(p, [q]) !== expected) straight.wrong++;
+		}
+		straight.flat = flat;
+		straight.ok = straight.wrong === 0 && straight.clear > 50 && straight.clear < straight.asked - 50 && flat === false;
+		report.sightStraight = straight;
+
+		// several places at once: seen when one of them is
+		const several = { asked: 300, wrong: 0 };
+		for (let i = 0; i < several.asked; i++) {
+			const p = spot();
+			const places = [spot(), spot(), spot()];
+			if (gpu.sees(p, places) !== places.some((q) => !reference.stopped(p, q, asBefore, sightSurfaces))) several.wrong++;
+		}
+		several.ok = several.wrong === 0;
+		report.sightSeveral = several;
+
+		const mirrored = { asked: 600, seen: 0, wrong: 0, ms: 0 };
+		const started = performance.now();
+		for (let i = 0; i < mirrored.asked; i++) {
+			const p = spot();
+			// near enough for a mirror to be between the two more often than not
+			const q = { x: p.x + Math.round((random() - 0.5) * 1600), y: p.y + Math.round((random() - 0.5) * 1600), z: Math.round(random() * 350) };
+			const chain = 1 + (i % 3);
+			const expected = reference.sightBetween(p, q, asBefore, chain, sightSurfaces);
+			if (expected) mirrored.seen++;
+			if (gpu.sees(p, [q], chain) !== expected) mirrored.wrong++;
+		}
+		mirrored.ms = +(performance.now() - started).toFixed(0);
+		mirrored.ok = mirrored.wrong === 0 && mirrored.seen > 5;
+		report.sightByMirrors = mirrored;
+
+		// the views in mirrors: the places a mirror is looked at, and the outline of each view
+		const views = { mirrors: 0, views: 0, corners: 0, cornersAtAnEnd: 0, cornersApart: 0, wrong: [] };
+		const ids = sightWalls.map((wall) => wall.id);
+		for (let i = 0; i < 60; i++) {
+			const origin = spot();
+			const eye = origin.z;
+			const standing = asBefore.filter((wall) => eye >= wall.bottom && eye <= wall.top);
+			const mirrors = gpu.mirrorsAt(eye);
+			const expectedMirrors = asBefore.map((wall, at) => (wall.sight && (wall.left || wall.right) && eye >= wall.bottom && eye <= wall.top ? at : -1)).filter((at) => at >= 0);
+			if (mirrors.join() !== expectedMirrors.join()) views.wrong.push(`mirrors at ${eye}`);
+			for (const at of mirrors.slice(0, 6)) {
+				const mirror = asBefore[at];
+				views.mirrors++;
+				const dx = mirror.bx - mirror.ax;
+				const dy = mirror.by - mirror.ay;
+				const side = (mirror.ay - origin.y) * (mirror.bx - origin.x) - (mirror.ax - origin.x) * (mirror.by - origin.y);
+				const faces = side !== 0 && (side > 0 ? mirror.left : mirror.right);
+				const pieces = faces ? Math.min(64, Math.max(6, Math.ceil(Math.hypot(dx, dy) / 20))) : 0;
+				const probes = gpu.mirrorProbes(origin, at);
+				if (probes.length !== pieces) { views.wrong.push(`probes of ${ids[at]}: ${probes.length} for ${pieces}`); continue; }
+				for (let k = 0; k < pieces; k++) {
+					const x = mirror.ax + (dx * (k + 0.5)) / pieces;
+					const y = mirror.ay + (dy * (k + 0.5)) / pieces;
+					const far = Math.hypot(origin.x - x, origin.y - y) || 1;
+					if (Math.abs(probes[k].x - (x + ((origin.x - x) / far) * 2)) > 1e-9 || Math.abs(probes[k].y - (y + ((origin.y - y) / far) * 2)) > 1e-9) views.wrong.push(`probe ${k} of ${ids[at]}`);
+				}
+				// a few stretches of the mirror are seen
+				const seen = Array.from({ length: pieces }, (_, k) => Math.floor((k * 5) / Math.max(pieces, 1) + i) % 2 === 0);
+				const windows = [];
+				let open = null;
+				seen.forEach((flag, k) => {
+					if (flag) { open ??= [k / pieces, 0]; open[1] = (k + 1) / pieces; } else if (open) { windows.push(open); open = null; }
+				});
+				if (open) windows.push(open);
+				const along = ((origin.x - mirror.ax) * dx + (origin.y - mirror.ay) * dy) / (dx * dx + dy * dy);
+				const behind = { x: Math.round(2 * (mirror.ax + dx * along) - origin.x), y: Math.round(2 * (mirror.ay + dy * along) - origin.y) };
+				const expected = windows.map(([from, to], number) => ({ number, outline: reference.viewThrough(behind, { x: mirror.ax + dx * from, y: mirror.ay + dy * from }, { x: mirror.ax + dx * to, y: mirror.ay + dy * to }, standing, mirror.id, 40000) }))
+					.filter((view) => view.outline);
+				const made = gpu.mirrorViews(origin, at, seen, 40000, eye);
+				if (made.length !== expected.length || made.some((view, k) => view.number !== expected[k].number || view.behind.x !== behind.x || view.behind.y !== behind.y || view.outline.length !== expected[k].outline.length)) {
+					views.wrong.push(`views of ${ids[at]}: ${made.length} for ${expected.length}`);
+					continue;
+				}
+				// A line that runs exactly through the end of a wall meets that wall or just misses it
+				// by the last digit of a sine, which the library and the browser do not work out
+				// alike. On such a line the two outlines may end at different places: at the wall's
+				// end or beyond it, and, where the wall is a limited one, at a later wall or beyond
+				// that. Any corner that is not on such a line has to be the same in both.
+				const throughAnEnd = (x, y) => standing.some((wall) => [[wall.ax, wall.ay], [wall.bx, wall.by]].some(([ex, ey]) => {
+					const far = Math.hypot(x - behind.x, y - behind.y) * Math.hypot(ex - behind.x, ey - behind.y);
+					return Math.abs((x - behind.x) * (ey - behind.y) - (y - behind.y) * (ex - behind.x)) < far * 1e-7 && (x - behind.x) * (ex - behind.x) + (y - behind.y) * (ey - behind.y) > 0;
+				}));
+				made.forEach((view, k) => {
+					views.views++;
+					for (let c = 0; c < view.outline.length; c += 2) {
+						const [x, y, wantedX, wantedY] = [view.outline[c], view.outline[c + 1], expected[k].outline[c], expected[k].outline[c + 1]];
+						views.corners++;
+						if (Math.hypot(x - wantedX, y - wantedY) <= 0.01) continue;
+						if (throughAnEnd(x, y) && throughAnEnd(wantedX, wantedY)) views.cornersAtAnEnd++;
+						else views.cornersApart++;
+					}
+				});
+			}
+		}
+		views.ok = views.wrong.length === 0 && views.views > 30 && views.cornersApart === 0 && views.cornersAtAnEnd <= views.corners * 0.02;
+		views.wrong = views.wrong.slice(0, 5);
+		report.mirrorViews = views;
+
+		// the places of a token another looks at
+		const places = gpu.tokenPlaces({ x: 500, y: 300 }, 100, 200, 40, 140);
+		const expectedPlaces = [0.9, 0.5].flatMap((share) => [[0, 0], [-1, -1], [1, -1], [1, 1], [-1, 1]].map(([sx, sy]) => [500 + sx * 25, 300 + sy * 50, 40 + 100 * share]));
+		report.tokenPlaces = { places: places.length, ok: places.length === 10 && places.every((at, k) => Math.abs(at.x - expectedPlaces[k][0]) < 1e-9 && Math.abs(at.y - expectedPlaces[k][1]) < 1e-9 && Math.abs(at.z - expectedPlaces[k][2]) < 1e-9) };
+
+		// a map on which nothing has a height
+		report.sightFlat = { ok: gpu.setSight(sightWalls.map((wall) => ({ ...wall, bottom: -Infinity, top: Infinity })), [], rect) === true };
+	}
+
+	// --- I: where the light counts as lit ----------------------------------------------------
+	{
+		const row = {};
+		const litSize = { width: 240, height: 184 };
+		gpu.traceLights(highJson, lamps, { ...litSize, samples: 16, bounces: 2, smoothing: 2, antialias: 2, wallHeight: 200 });
+		const picture = gpu.readPicture();
+		const map = gpu.litMap(0.25, 0.5);
+		// as the module worked it out: the brightest part of a pixel against two steps
+		const least = Math.max(1, Math.round(255 * 0.25 * 0.5));
+		const bright = Math.round((255 * (0.25 + 1)) / 2);
+		let wrongImage = 0;
+		let wrongLevel = 0;
+		const counts = [0, 0, 0];
+		for (let y = 0; y < litSize.height; y++) {
+			for (let x = 0; x < litSize.width; x++) {
+				const from = ((litSize.height - 1 - y) * litSize.width + x) * 4;
+				const most = Math.max(picture.data[from], picture.data[from + 1], picture.data[from + 2]);
+				const level = most >= bright ? 2 : (most >= least ? 1 : 0);
+				counts[level]++;
+				const to = (y * litSize.width + x) * 4;
+				if (map.image[to] !== (level ? 255 : 0) || map.image[to + 3] !== (level ? 255 : 0) || map.image[to + 1] !== 0 || map.image[to + 2] !== 0) wrongImage++;
+				if (gpu.litAt(b.x + ((x + 0.5) / litSize.width) * b.width, b.y + ((y + 0.5) / litSize.height) * b.height) !== level) wrongLevel++;
+			}
+		}
+		row.counts = counts;
+		row.wrongImage = wrongImage;
+		row.wrongLevel = wrongLevel;
+		row.outside = gpu.litAt(b.x - 10, b.y + 100);
+		row.ok = map.width === litSize.width && map.height === litSize.height && wrongImage === 0 && wrongLevel === 0 && row.outside === 0 && counts.every((count) => count > 0);
+		report.litMap = row;
+	}
+
+	// --- J: the scene looked at from the side ------------------------------------------------
+	{
+		const row = {};
+		const tilt = Math.PI / 6;
+		const lie = gpu.lie(tilt);
+		const a = Math.cos(tilt), bb = -Math.sin(tilt), c = Math.sin(2 * tilt), d = Math.cos(2 * tilt);
+		const det = a * d - bb * c;
+		const up = { x: c / det, y: -a / det };
+		row.lie = [lie.a - a, lie.b - bb, lie.c - c, lie.d - d, lie.det - det, lie.up.x - up.x, lie.up.y - up.y, lie.across.x - a / Math.hypot(a, c), lie.across.y - c / Math.hypot(a, c)].every((apart) => Math.abs(apart) < 1e-6);
+		row.flat = Math.abs(gpu.lie(0).a - 1) < 1e-6 && Math.abs(gpu.lie(0).up.y + 1) < 1e-6;
+		const shapes = gpu.standing(tilt, 20, 200,
+			[{ x: 900, y: 500, radius: 50, bottom: 20, top: 120, picked: true }, { x: 300, y: 200, radius: 40, bottom: 20, top: 20 }],
+			[{ a: { x: 100, y: 100 }, b: { x: 400, y: 100 }, bottom: 20, top: 140, mirror: true }, { a: { x: 100, y: 600 }, b: { x: 400, y: 700 } }],
+			[{ z: 80, t: [0, 0, 100, 0, 0, 100] }, { z: 10, t: [0, 0, 100, 0, 0, 100] }],
+			[{ x: 500, y: 500, z: 220, color: [1, 0, 0], strength: 0.5 }]);
+		row.shapes = shapes.map((shape) => `${shape.what}:${shape.flag}:${shape.numbers.length}`).join(' ');
+		// the token farther back first (farther up the screen, or farther to the right); one without
+		// height is its top alone; the floor below the ground is left out; the wall farther back first
+		const near = (list, expected) => list.length === expected.length && expected.every((value, k) => Math.abs(list[k] - value) < 0.01);
+		const top = shapes.find((shape) => shape.what === 'bodyTop' && shape.flag === 1);
+		const wall = shapes.find((shape) => shape.what === 'wall' && shape.flag === 1);
+		const open = shapes.find((shape) => shape.what === 'wall' && shape.flag === 2);
+		const lamp = shapes.find((shape) => shape.what === 'lamp');
+		row.ok = row.lie && row.flat && row.shapes === 'bodySide:1:68 bodyTop:1:3 bodyTop:0:3 floor:0:6 wall:1:8 wall:2:8 lamp:0:7'
+			&& near(top.numbers, [900 + up.x * 100, 500 + up.y * 100, 50])
+			&& near(wall.numbers, [100, 100, 400, 100, 400 + up.x * 120, 100 + up.y * 120, 100 + up.x * 120, 100 + up.y * 120])
+			&& near(open.numbers, [100, 600, 400, 700, 400 + up.x * 200, 700 + up.y * 200, 100 + up.x * 200, 600 + up.y * 200])
+			&& near(lamp.numbers, [500, 500, 500 + up.x * 200, 500 + up.y * 200, 1, 0.5, 0.5]);
+		report.fromTheSide = row;
+	}
+
+	// --- K: the scene in perspective ---------------------------------------------------------
+	{
+		const row = {};
+		const all = { x: 0, y: 0, width: 4000, height: 3000 };
+		gpu.view.scene({ floor: 0, viewedBase: 0, tall: 200, area: all, lightArea: all, all,
+			levels: [{ viewed: true, base: 0, plane: true, color: [1, 1, 1], floors: [{ z: 100, t: [1000, 1000, 1400, 1000, 1000, 1400] }] },
+				{ viewed: false, base: 400, plane: false, color: [0.2, 0.4, 0.6], floors: [{ z: 400, t: [2000, 1000, 2600, 1000, 2000, 1600] }] }],
+			surfaces: [{ z: 250, t: [500, 500, 900, 500, 500, 900] }],
+			walls: [{ a: { x: 1500, y: 800 }, b: { x: 1900, y: 800 }, bottom: 0, top: 150, mirror: false }, { a: { x: 1500, y: 2000 }, b: { x: 1900, y: 2200 }, mirror: true }] });
+		gpu.view.start(2000, 1500, 900, 0.25);
+		const screen = { lies: { a: 0.25, b: 0, c: 0, d: 0.25, tx: 100, ty: 50 }, width: 1200, height: 900, aspect: 1200 / 900, zoom: 0.25, least: 0.05, pivot: { x: 2000, y: 1500 }, cover: false };
+		const tokens = [{ x: 2200, y: 1500, radius: 50, bottom: 0, top: 100, picked: true, shows: 0 }, { x: 1700, y: 1300, radius: 50, bottom: 0, top: 100, shows: 1 }, { x: 1700, y: 1700, radius: 50, bottom: 0, top: 0, shows: 2 }];
+		const lights = [{ x: 2100, y: 1200, z: 150, color: [1, 0.5, 0.2], strength: 1 }];
+		const levels = [{ picture: false, light: false }, { picture: false, light: true }];
+		const frame = gpu.view.frame(screen, tokens, lights, levels);
+		row.draws = frame.draws.map((draw) => `${draw.lines ? 'lines' : (draw.glass ? 'glass' : 'solid')}${draw.lit ? ' lit' : ''}${draw.shows ? ' own ' + draw.ref : ''}${draw.light >= 0 ? ' light ' + draw.light : ''}:${draw.count}`).join(', ');
+		// one run of vertices after the other, all of them finite, and triangles in threes
+		let next = 0;
+		row.inARow = frame.draws.every((draw) => { const fits = draw.first === next && draw.count % (draw.lines ? 2 : 3) === 0; next += draw.count; return fits; }) && next * 10 === frame.vertices.length;
+		row.finite = frame.vertices.every(Number.isFinite) && frame.matrix.every(Number.isFinite);
+		// the middle of the screen is the place the camera looks at, and back
+		const middle = gpu.view.sceneAt(0, 0);
+		const back = gpu.view.screenAt(2000, 1500);
+		row.middle = [middle.x, middle.y].map((v) => +v.toFixed(1));
+		row.back = [back.x, back.y].map((v) => +v.toFixed(3));
+		// that place through the camera's matrix is the middle of the screen as well
+		const m = frame.matrix;
+		const through = [0, 1, 3].map((k) => m[k] * 2000 + m[4 + k] * 1500 + m[12 + k]);
+		row.throughMatrix = [through[0] / through[2], through[1] / through[2]].map((v) => +v.toFixed(4));
+		// a token is met on its top, the raised floor at its height, the sky not at all
+		const onToken = gpu.view.screenAt(2200, 1500);
+		// the left button holds what it took at its height: the same place a little to the side
+		gpu.view.press(onToken.x * 2 - 1, 1 - onToken.y * 2);
+		const held = gpu.view.sceneAt(onToken.x * 2 - 1 + 0.2, 1 - onToken.y * 2);
+		gpu.view.release();
+		const loose = gpu.view.sceneAt(onToken.x * 2 - 1 + 0.2, 1 - onToken.y * 2);
+		row.held = held && +held.x.toFixed(0);
+		row.loose = loose && +loose.x.toFixed(0);
+		// the camera: moved, the ground under the mouse stays under it; turned and brought closer
+		const before = gpu.view.sceneAt(0.2, -0.2);
+		gpu.view.drag(0.2, -0.2, -0.1, 0.1);
+		gpu.view.frame(screen, tokens, lights, levels);
+		const after = gpu.view.sceneAt(-0.1, 0.1);
+		row.dragged = +Math.hypot(before.x - after.x, before.y - after.y).toFixed(2);
+		gpu.view.turn(120, -40);
+		gpu.view.zoom(-600, 5000);
+		// a flat view that shows far too much is sent to the part of the ground the camera sees
+		const turned = gpu.view.frame({ ...screen, zoom: 0.01 }, tokens, lights, levels);
+		row.follow = Boolean(turned.follow) && turned.follow.x > 0 && turned.follow.x < 4000 && turned.follow.y > 0 && turned.follow.y < 3000 && turned.follow.scale > 0.01;
+		// the cover test is drawn once testCover has kept one
+		const wallsOnly = single([{ c: [1900, 1300, 1900, 1700], w: { move: NORMAL, top: 60 } }], [], all);
+		gpu.testCover(wallsOnly, [1700, 1500, 90], [[2200, 1500, 0, 100, 100]], 60, 0, 3, 4, true);
+		const withCover = gpu.view.frame({ ...screen, cover: true }, tokens, lights, levels);
+		const without = gpu.view.frame(screen, tokens, lights, levels);
+		row.coverVertices = withCover.vertices.length / 10 - without.vertices.length / 10;
+		// frame after frame takes no more memory
+		for (let i = 0; i < 100; i++) gpu.view.frame({ ...screen, cover: true }, tokens, lights, levels);
+		const bytes = gpu.memoryBytes();
+		const started = performance.now();
+		for (let i = 0; i < 400; i++) {
+			gpu.view.turn(1, 0);
+			gpu.view.frame({ ...screen, cover: true }, tokens, lights, levels);
+			gpu.view.sceneAt(0.3, 0.1);
+		}
+		row.msPerFrame = +((performance.now() - started) / 400).toFixed(3);
+		row.grew = gpu.memoryBytes() - bytes;
+		// looking as flat as it goes, the top of the screen is sky
+		gpu.view.turn(0, -1000);
+		gpu.view.frame(screen, tokens, lights, levels);
+		row.sky = gpu.view.sceneAt(0, 0.99);
+		gpu.view.stop();
+		row.stopped = gpu.view.sceneAt(0, 0);
+		row.ok = row.inARow && row.finite && Math.hypot(middle.x - 2000, middle.y - 1500) < 0.5 && Math.abs(back.x - 0.5) < 0.001 && Math.abs(back.y - 0.5) < 0.001
+			&& Math.abs(row.throughMatrix[0]) < 0.001 && Math.abs(row.throughMatrix[1]) < 0.001 && row.sky === null && row.held !== null && row.loose !== null && row.held !== row.loose
+			&& row.dragged < 1 && row.follow === true && row.coverVertices > 20 && row.grew === 0 && row.stopped === null
+			&& /^solid:\d+, solid lit light 1:3, solid own 1:\d+, glass:\d+, lines:\d+$/.test(row.draws);
+		report.inPerspective = row;
+	}
+	// --- L: a source seen in a mirror ---------------------------------------------------------
+	{
+		const row = {};
+		// one wall that mirrors, a lamp before it, and only what is thrown back in the picture
+		const mirror = (smoothness) => single([{ c: [600, 50, 600, 750], w: { light: NORMAL, top: 200, metallicLeft: 1, smoothnessLeft: smoothness, metallicRight: 1, smoothnessRight: smoothness } }]);
+		const lamp = [{ x: 450, y: 400, z: 40, radius: 500, bright: 250, reflectedOnly: true }];
+		// the picture round a place: how bright it is there, and how far its pixels are apart
+		const round = (x, y) => {
+			const image = pixelsOf();
+			let low = 255, high = 0, sum = 0, count = 0;
+			for (let j = -6; j <= 6; j++) for (let i = -6; i <= 6; i++) {
+				const value = image.data[((Math.round(y / 2) + j) * size.width + Math.round(x / 2) + i) * 4];
+				low = Math.min(low, value); high = Math.max(high, value); sum += value; count++;
+			}
+			return { mean: +(sum / count).toFixed(1), apart: high - low };
+		};
+		// The place is 150 from the lamp on the side away from the wall: the mirrored lamp is 450
+		// away, the wall being a third of that way. The wall mirrors 0.8 of the light it gets,
+		// which is the lamp's bright light, and a ninth of that arrives: as a pixel, 85.
+		gpu.traceLights(mirror(1), lamp, { ...size, samples: 4, bounces: 2, smoothing: 0 });
+		row.fewPaths = round(300, 400);
+		keep('a lamp in a mirror, four paths per pixel, not smoothed');
+		gpu.traceLights(mirror(1), lamp, { ...size, samples: 256, bounces: 2, smoothing: 0 });
+		row.manyPaths = round(300, 400);
+		// behind the wall nothing is mirrored
+		row.behindTheWall = round(800, 400);
+		// The pixels round the place differ by how the light fades there, not by chance: with four
+		// paths as with many.
+		row.ok = Math.abs(row.fewPaths.mean - 85) < 6 && row.fewPaths.apart <= 8 && Math.abs(row.manyPaths.mean - row.fewPaths.mean) < 2 && row.manyPaths.apart === row.fewPaths.apart && row.behindTheWall.mean < 3;
+		report.lampInAMirror = row;
 	}
 	report.allOk = Object.values(report).every((row) => typeof row !== 'object' || row === null || row.ok !== false);
 	report.stage = 'done';

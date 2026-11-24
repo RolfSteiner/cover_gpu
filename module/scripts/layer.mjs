@@ -1,6 +1,8 @@
 // The view, drawn on the canvas of the scene. It works on the walls of the scene as they sit in
-// game.canvas.walls.quadtree, and every calculation is done by the GPU build of the script
-// (../lib/test_local_gpu_api.js):
+// game.canvas.walls.quadtree, and every calculation is done by the script library
+// (../lib/test_local_gpu_api.js; its ray tests run on the graphics card). What is done here is
+// reading the scene from Foundry, saying when something has to be worked out again, and drawing
+// what the library answers:
 //  - rays: what a ray crosses (bounding boxes and walls);
 //  - a cover test: how much of every other token the walls hide from the selected token;
 //  - the light of the scene's own light sources, path traced by the script. That is not drawn
@@ -46,7 +48,7 @@ import { quadtreeJson, wallSurface } from './quadtree.mjs';
 import { LAYER, NUMBERS, value, setValue } from './settings.mjs';
 import { Obstacles } from './sight.mjs';
 import { View3D } from './view3d.mjs';
-import { refreshVisioner, visionerHooks } from './wrappers.mjs';
+import { refreshVisioner } from './wrappers.mjs';
 
 const { InteractionLayer } = foundry.canvas.layers;
 
@@ -183,6 +185,18 @@ export class CoverViewLayer extends InteractionLayer {
 	/** The scene as the script reads it for each level that is not viewed, as one text: the light is traced again when it changes. */
 	#levelsKey = '';
 
+	/**
+	 * What of the scene the view in perspective is given once and keeps: `{ key, version, scene }`,
+	 * `key` being what it was made from as text and `version` another number for each making.
+	 */
+	#kept = { key: '', version: 0, scene: null };
+
+	/** Counts the makings of `#whole` and the times the walls were taken anew. */
+	#made = 0;
+
+	/** How the scene lies on the screen (`lie` of the library), and the tilt it was asked for. */
+	#lay = null;
+
 	/** True once a failure of `seenOver` was reported, so that one that repeats is reported once. */
 	#sightFailed = false;
 
@@ -234,6 +248,8 @@ export class CoverViewLayer extends InteractionLayer {
 		}
 		this.#coverTest = null;
 		this.#coverInputs = '';
+		// the walls on the canvas are those of another scene, or of another level, from here on
+		this.#obstacles.changed();
 		const add = (child) => this.addChild(child);
 		const parts = {
 			cells: add(new PIXI.Graphics()),
@@ -289,14 +305,12 @@ export class CoverViewLayer extends InteractionLayer {
 
 	/**
 	 * Shows the view to a GM while it is switched on or its own controls are active. The script
-	 * library is loaded the first time the view is shown, or the path traced light is wanted,
-	 * which may be for any user.
+	 * library is loaded with the first scene, for every user: what tokens see over walls and in
+	 * mirrors is asked of it, whether or not anything of the view is shown.
 	 */
 	#showOrHide() {
 		// the tokens as they stand in the isometric view are drawn on this layer too
 		this.visible = this.#shown || (game.user.isGM && this.#tilted);
-		// PF2E Visioner's cover asks the script library, whether or not anything of the view is shown
-		if (!this.#shown && !value('lights') && !visionerHooks().includes('cover')) return;
 		this.#load().then(() => {
 			this.refreshTree();
 			// a view that was hidden has not followed the tokens
@@ -309,6 +323,12 @@ export class CoverViewLayer extends InteractionLayer {
 		this.#loading ??= loadLibrary()
 			.then((cover) => {
 				this.#cover = cover;
+				this.#obstacles.use(cover);
+				this.#view3d.use(cover);
+				// the view in perspective may have been asked for before there was a library to show it
+				this.#applyPerspective();
+				// what tokens see over walls is known from here on
+				if (canvas.ready) canvas.perception?.update({ refreshVision: true });
 			})
 			.catch((error) => {
 				console.error(error);
@@ -339,6 +359,7 @@ export class CoverViewLayer extends InteractionLayer {
 		this.#treeJson = json;
 		this.#lightJson = lightJson;
 		this.#levelsKey = levelsKey;
+		this.#made++;
 		this.#surfaces = tree.surfaces ?? [];
 		this.#root = root;
 		this.#shares.clear();
@@ -396,21 +417,15 @@ export class CoverViewLayer extends InteractionLayer {
 	}
 
 	/**
-	 * How the scene lies on the screen, but for the zoom: a step of (x, y) on the scene is a step
-	 * of (a x + c y, b x + d y) on the screen. `up` is the step on the scene that is one unit
-	 * straight up on the screen, which is where a height of 1 goes in the isometric view (and
-	 * what "above" a place means for a label in either view); `across` is the direction on the
-	 * scene that runs farthest to the right on the screen.
+	 * How the scene lies on the screen, but for the zoom (`lie` of the library): a step of (x, y)
+	 * on the scene is a step of (a x + c y, b x + d y) on the screen. `up` is the step on the
+	 * scene that is one unit straight up on the screen, which is where a height of 1 goes in the
+	 * isometric view (and what "above" a place means for a label in either view).
 	 */
 	get #lie() {
 		const tilt = this.#tilted ? TILT : 0;
-		const a = Math.cos(tilt);
-		const b = -Math.sin(tilt);
-		const c = Math.sin(2 * tilt);
-		const d = Math.cos(2 * tilt);
-		const det = a * d - b * c;
-		const wide = Math.hypot(a, c);
-		return { a, b, c, d, det, up: { x: c / det, y: -a / det }, across: { x: a / wide, y: c / wide } };
+		if (this.#lay?.tilt !== tilt) this.#lay = { tilt, lie: this.#cover.lie(tilt) };
+		return this.#lay.lie;
 	}
 
 	/** True once there is a tree to calculate on. */
@@ -507,23 +522,16 @@ export class CoverViewLayer extends InteractionLayer {
 		return true;
 	}
 
-	/** The script takes one diameter for all targets of a call, so targets of one size share a call. */
+	/** Has the library test every target, and keep the results for the view in perspective to show. */
 	#runCoverTest() {
 		const test = this.#coverTest;
-		const bySize = new Map();
-		for (const target of test.targets) {
-			if (!bySize.has(target.da)) bySize.set(target.da, []);
-			bySize.get(target.da).push(target);
-		}
 		const started = performance.now();
 		try {
-			for (const [da, targets] of bySize) {
-				const results = this.#cover.testCover(this.#treeJson, [test.s.x, test.s.y, test.eye], targets.map((target) => [target.p.x, target.p.y, target.bottom, target.head]),
-					test.ds, da, value('points'), value('heights'));
-				targets.forEach((target, order) => {
-					target.result = results[order];
-				});
-			}
+			const results = this.#cover.testCover(this.#treeJson, [test.s.x, test.s.y, test.eye], test.targets.map((target) => [target.p.x, target.p.y, target.bottom, target.head, target.da]),
+				test.ds, 0, value('points'), value('heights'), true);
+			test.targets.forEach((target, order) => {
+				target.result = results[order];
+			});
 		} catch (error) {
 			test.error = errorText(error);
 		}
@@ -585,23 +593,15 @@ export class CoverViewLayer extends InteractionLayer {
 
 	/**
 	 * Where one token looks from and the places of another it looks at, each `{ x, y, z }` with z
-	 * the height in scene pixels: the middle of the other and four places half way out to its
-	 * corners, each near its head and at half its height.
+	 * the height in scene pixels (`tokenPlaces` of the library).
 	 * @returns {{from: object, places: object[]}|null} null where a token has no place
 	 */
 	#looks(observer, target) {
 		const from = observer?.center;
 		const to = target?.center;
 		if (!from || !to) return null;
-		const w = (target.w ?? 0) / 4;
-		const h = (target.h ?? 0) / 4;
 		const body = tokenHeights(target);
-		const places = [];
-		for (const share of [0.9, 0.5]) {
-			const z = body.bottom + (body.top - body.bottom) * share;
-			places.push({ x: to.x, y: to.y, z }, { x: to.x - w, y: to.y - h, z }, { x: to.x + w, y: to.y - h, z }, { x: to.x + w, y: to.y + h, z }, { x: to.x - w, y: to.y + h, z });
-		}
-		return { from: { x: from.x, y: from.y, z: tokenHeights(observer).eye }, places };
+		return { from: { x: from.x, y: from.y, z: tokenHeights(observer).eye }, places: this.#obstacles.tokenPlaces(to, target.w ?? 0, target.h ?? 0, body.bottom, body.top) };
 	}
 
 	/**
@@ -626,7 +626,7 @@ export class CoverViewLayer extends InteractionLayer {
 		const looks = this.#looks(observer, target);
 		if (!looks) return false;
 		try {
-			return looks.places.some((place) => this.#obstacles.clear(looks.from, place));
+			return this.#obstacles.sees(looks.from, looks.places);
 		} catch (error) {
 			console.error(error);
 			return false;
@@ -665,7 +665,7 @@ export class CoverViewLayer extends InteractionLayer {
 						const test = { point: { x: place.x, y: place.y, elevation: place.z / per }, level, los: new Map() };
 						if (asked._testRange?.(source, mode, object, test) === false || asked._testAngle?.(source, mode, object, test) === false) continue;
 						if (id === 'lightPerception' && !canvas.effects.testInsideLight(test.point)) continue;
-						if (this.#obstacles.clear(looks.from, place)) return true;
+						if (this.#obstacles.sees(looks.from, [place])) return true;
 					}
 				}
 			}
@@ -806,16 +806,19 @@ export class CoverViewLayer extends InteractionLayer {
 	/**
 	 * What the view in perspective is to draw right now (see view3d.mjs): the whole scene, every
 	 * level of it.
-	 *  - `levels`: each level with the height of its base, whether it has a floor all over
-	 *    there (`plane`), its further floors (the surfaces that are floors of it), and what
-	 *    they show. The viewed level shows Foundry's own picture. Another level shows its own
-	 *    picture or color (`image`, `color`), lit by the light that was traced for its floors
-	 *    (`light`, see lighting.mjs) between the colors Foundry gives an unlit and a lit place.
+	 *  - `scene`: what stays from frame to frame, as the library takes it, with `version` being
+	 *    another number whenever it has changed. Each level with the height of its base, whether
+	 *    it has a floor all over there (`plane`), its further floors (the surfaces that are
+	 *    floors of it) and its color. `walls` and the surfaces that are no floor of any level
+	 *    belong to the GM's view, and are left out while that is not shown. A wall that names
+	 *    levels ends where those levels end.
+	 *  - `levels`: what each level shows. The viewed level shows Foundry's own picture. Another
+	 *    level shows its own picture (`image`) or its color, lit by the light that was traced for
+	 *    its floors (`light`, see lighting.mjs).
 	 *  - `tokens`: every token of the scene. One that Foundry has on the canvas shows on its top
 	 *    what Foundry draws of it; another shows its own picture (`image`).
-	 *  - `walls`, the surfaces that are no floor of any level, the traced lights and the cover
-	 *    test belong to the GM's view, and are left out while that is not shown. A wall that
-	 *    names levels ends where those levels end.
+	 *  - `lights`, the traced lights, and `cover`, whether the cover test is shown, belong to the
+	 *    GM's view too.
 	 */
 	#seen() {
 		const shown = this.#shown;
@@ -831,15 +834,25 @@ export class CoverViewLayer extends InteractionLayer {
 					mirror: (surface.metallicLeft >= 0.99 && surface.smoothnessLeft >= 0.99) || (surface.metallicRight >= 0.99 && surface.smoothnessRight >= 0.99) });
 			}
 			this.#whole = { at: this.#obstacles.count, view: canvas.level, levels, surfaces: surfacesByLevel(levels), walls };
+			this.#made++;
 		}
 		const whole = this.#whole;
 		const lights = this.#lighting.info;
 		const pictures = lights?.traced ? this.#lighting.levelPictures : new Map();
 		const size = canvas.dimensions?.size ?? 100;
-		const levels = whole.levels.map((entry) => ({ id: entry.id, viewed: entry.viewed, base: entry.base, plane: entry.plane, image: entry.image, color: entry.color,
-			light: entry.viewed ? null : pictures.get(entry.id) ?? null,
-			// a floor at the height of a floor that is all over is that floor
-			floors: whole.surfaces.filter((surface) => surface.of.includes(entry.id) && (!entry.plane || surface.z > entry.base + 0.5)) }));
+		const tall = (value('wallHeight') || 2) * size;
+		const area = canvas.dimensions?.sceneRect ?? canvas.dimensions?.rect;
+		const all = canvas.dimensions?.rect;
+		const key = [this.#made, shown, tall, ...[area, all, this.#root].map((r) => (r ? [r.x, r.y, r.width, r.height].join() : ''))].join('|');
+		if (key !== this.#kept.key) {
+			this.#kept = { key, version: this.#kept.version + 1, scene: {
+				floor: whole.levels[0].base, viewedBase: whole.levels.find((entry) => entry.viewed)?.base ?? whole.levels[0].base, tall, area, lightArea: this.#root, all,
+				levels: whole.levels.map((entry) => ({ viewed: entry.viewed, base: entry.base, plane: entry.plane, color: entry.color,
+					// a floor at the height of a floor that is all over is that floor
+					floors: whole.surfaces.filter((surface) => surface.of.includes(entry.id) && (!entry.plane || surface.z > entry.base + 0.5)) })),
+				surfaces: shown ? whole.surfaces.filter((surface) => !surface.of.length) : [],
+				walls: shown ? (whole.walls.length ? whole.walls : [...this.#walls.values()]) : [] } };
+		}
 
 		const tokens = this.#bodies();
 		for (const token of scene?.tokens ?? []) {
@@ -850,25 +863,13 @@ export class CoverViewLayer extends InteractionLayer {
 			tokens.push({ x: token.x + wide / 2, y: token.y + high / 2, radius: Math.min(wide, high) / 2, bottom: heights.bottom, top: heights.top, picked: false, image: token.texture?.src ?? null });
 		}
 
-		// the cover test: from the place of the source that sees most of each target
-		const cover = [];
-		const test = shown ? this.#coverTest : null;
-		for (const target of test?.targets ?? []) {
-			const result = target.result;
-			if (!result?.points?.length) continue;
-			const best = result.points.reduce((p, q) => (q.obstructed < p.obstructed ? q : p));
-			cover.push({ eye: [best.at.x, best.at.y, best.at.z], line: [result.lineA, result.lineB].map((p) => [p.x, p.y, p.z]), centre: target.p, radius: target.da / 2,
-				bottom: target.bottom, top: target.head, heights: result.heights ?? 1, runs: best.runs.map((run) => ({ from: run.from, to: run.to, mask: run.mask ?? (run.blocked ? 1 : 0) })) });
-		}
-
 		const colors = canvas.colors ?? {};
-		return { floor: whole.levels[0].base, viewedBase: whole.levels.find((entry) => entry.viewed)?.base ?? whole.levels[0].base,
-			area: canvas.dimensions?.sceneRect ?? canvas.dimensions?.rect, lightArea: this.#root,
-			dark: colors.background?.rgb ?? [0.19, 0.19, 0.19], bright: colors.bright?.rgb ?? [1, 1, 1],
-			tall: (value('wallHeight') || 2) * size, levels, tokens, cover,
-			surfaces: shown ? whole.surfaces.filter((surface) => !surface.of.length) : [],
-			walls: shown ? (whole.walls.length ? whole.walls : [...this.#walls.values()]) : [],
-			lights: shown && lights?.traced ? lights.lights ?? [] : [] };
+		return { version: this.#kept.version, scene: this.#kept.scene,
+			levels: whole.levels.map((entry) => ({ id: entry.id, viewed: entry.viewed, image: entry.image, light: entry.viewed ? null : pictures.get(entry.id) ?? null })),
+			tokens, lights: shown && lights?.traced ? lights.lights ?? [] : [],
+			// from the place of the source that sees most of each target, as the library kept it
+			cover: Boolean(shown && this.#coverTest && !this.#coverTest.error),
+			dark: colors.background?.rgb ?? [0.19, 0.19, 0.19], bright: colors.bright?.rgb ?? [1, 1, 1] };
 	}
 
 	/** To PIXI: where on Foundry's flat picture the mouse is, while the scene is shown in perspective (see wrappers.mjs). */
@@ -887,40 +888,33 @@ export class CoverViewLayer extends InteractionLayer {
 	}
 
 	/**
-	 * The tokens as they stand in the isometric view: each a cylinder from its feet to its head,
-	 * the farther ones drawn first. A cylinder is one outline (the near half of its bottom, its
-	 * two sides, the far half of its top) and its top over that.
+	 * What stands on the scene in the isometric view, as the library outlines it (`standing`):
+	 * every token as a cylinder from its feet to its head, and, with the view shown, the walls
+	 * from their bottom to their top, the floors and roofs where they lie, and each traced light
+	 * at its height. Nothing while the canvas is not turned.
 	 */
-	#drawBodies() {
+	#standing() {
+		if (!this.#tilted || !this.#cover) return [];
+		const shown = this.#shown && this.#root;
+		const lights = this.#lighting.info;
+		// the map lies at the height of the ground: the lowest floor that is seen; a wall without
+		// a top is drawn as high as it throws light back
+		return this.#cover.standing(TILT, viewedFloors().ground, (value('wallHeight') || 2) * (canvas.dimensions?.size ?? 100), this.#bodies(),
+			shown ? [...this.#walls.values()] : [], shown ? this.#surfaces : [], shown && lights && !lights.error ? lights.lights ?? [] : []);
+	}
+
+	/**
+	 * Draws the tokens as they stand: the farther ones first, each as one outline (the near half
+	 * of its bottom, its two sides, the far half of its top) and its top over that.
+	 */
+	#drawBodies(standing) {
 		const g = this.#parts.bodies;
 		g.clear();
-		if (!this.#tilted) return;
 		const u = this.#unit;
-		const lie = this.#lie;
-		// the map lies at the height of the ground: the lowest floor that is seen
-		const floor = viewedFloors().ground;
-		const beside = { x: -lie.across.y, y: lie.across.x };
-		// the way round a circle that comes nearer the bottom of the screen
-		const near = lie.b * beside.x + lie.d * beside.y > 0 ? 1 : -1;
-		const arc = (body, z, from, to, way) => {
-			const points = [];
-			for (let k = 0; k <= 16; k++) {
-				const turn = from + ((to - from) * k) / 16;
-				const x = body.x + body.radius * (Math.cos(turn) * lie.across.x + Math.sin(turn) * way * beside.x);
-				const y = body.y + body.radius * (Math.cos(turn) * lie.across.y + Math.sin(turn) * way * beside.y);
-				points.push(x + lie.up.x * (z - floor), y + lie.up.y * (z - floor));
-			}
-			return points;
-		};
-		const depth = (body) => lie.b * body.x + lie.d * body.y;
-		for (const body of this.#bodies().sort((p, q) => depth(p) - depth(q))) {
-			const color = body.picked ? PICKED : INK;
-			const top = { x: body.x + lie.up.x * (body.top - floor), y: body.y + lie.up.y * (body.top - floor) };
-			if (body.top > body.bottom) {
-				g.lineStyle({ width: 1.5 * u, color, alpha: 0.9 }).beginFill(color, 0.2)
-					.drawPolygon([...arc(body, body.bottom, Math.PI, 0, near), ...arc(body, body.top, 0, Math.PI, -near)]).endFill();
-			}
-			g.lineStyle({ width: 1.5 * u, color, alpha: 0.9 }).beginFill(color, 0.16).drawCircle(top.x, top.y, body.radius).endFill();
+		for (const { what, flag, numbers } of standing) {
+			const color = flag ? PICKED : INK;
+			if (what === 'bodySide') g.lineStyle({ width: 1.5 * u, color, alpha: 0.9 }).beginFill(color, 0.2).drawPolygon(Array.from(numbers)).endFill();
+			else if (what === 'bodyTop') g.lineStyle({ width: 1.5 * u, color, alpha: 0.9 }).beginFill(color, 0.16).drawCircle(numbers[0], numbers[1], numbers[2]).endFill();
 		}
 	}
 
@@ -939,7 +933,8 @@ export class CoverViewLayer extends InteractionLayer {
 		// nobody sees a hidden layer, and for any user but the GM it is always hidden
 		if (!parts || !this.visible) return;
 		this.#drawnZoom = canvas.stage.scale.x;
-		this.#drawBodies();
+		const standing = this.#standing();
+		this.#drawBodies(standing);
 		if (!this.#shown || !this.#root) {
 			this.#clearView();
 			return;
@@ -990,32 +985,14 @@ export class CoverViewLayer extends InteractionLayer {
 			}
 		}
 
-		// --- the isometric view: what has a height stands. Walls are drawn from the back of the
-		// screen to the front, so that the nearer ones lie over the farther.
-		const isometric = this.#tilted;
-		const lie = this.#lie;
-		const floor = viewedFloors().ground;
-		const lifted = (p, z) => ({ x: p.x + lie.up.x * (z - floor), y: p.y + lie.up.y * (z - floor) });
-		if (isometric) {
-			parts.walls.lineStyle(0);
-			for (const surface of this.#surfaces) {
-				if (!(surface.z > floor)) continue;
-				for (let i = 0; i + 5 < surface.t.length; i += 6) {
-					const corners = [0, 2, 4].flatMap((k) => { const at = lifted({ x: surface.t[i + k], y: surface.t[i + k + 1] }, surface.z); return [at.x, at.y]; });
-					parts.walls.beginFill(FLOOR, 0.16).drawPolygon(corners).endFill();
-				}
-			}
-			// a wall without a top is drawn as high as it throws light back
-			const tall = (value('wallHeight') || 2) * (canvas.dimensions?.size ?? 100);
-			const depth = (w) => lie.b * (w.a.x + w.b.x) + lie.d * (w.a.y + w.b.y);
-			for (const w of [...this.#walls.values()].sort((p, q) => depth(p) - depth(q))) {
-				const bottom = Number.isFinite(w.bottom) ? w.bottom : floor;
-				const open = !Number.isFinite(w.top);
-				const top = open ? Math.max(bottom, floor) + tall : w.top;
-				const corners = [lifted(w.a, bottom), lifted(w.b, bottom), lifted(w.b, top), lifted(w.a, top)].flatMap((at) => [at.x, at.y]);
-				const color = w.mirror ? MIRROR : MUTED;
-				parts.walls.lineStyle({ width: u, color, alpha: open ? 0.45 : 0.9, ...round }).beginFill(color, open ? 0.1 : 0.22).drawPolygon(corners).endFill();
-			}
+		// --- the isometric view: what has a height stands. Walls come from the back of the screen
+		// to the front, so that the nearer ones lie over the farther.
+		for (const { what, flag, numbers } of standing) {
+			if (what === 'floor') parts.walls.lineStyle(0).beginFill(FLOOR, 0.16).drawPolygon(Array.from(numbers)).endFill();
+			if (what !== 'wall') continue;
+			const color = flag & 1 ? MIRROR : MUTED;
+			const open = flag & 2;
+			parts.walls.lineStyle({ width: u, color, alpha: open ? 0.45 : 0.9, ...round }).beginFill(color, open ? 0.1 : 0.22).drawPolygon(Array.from(numbers)).endFill();
 		}
 		// --- cover test: per target the diameter of the source used for it, and per point of
 		// that diameter one triangle per run of rays, to where the run meets the target
@@ -1086,16 +1063,13 @@ export class CoverViewLayer extends InteractionLayer {
 				: game.i18n.format('COVERQV.Label.Ray', { number: ray.number, walls: ray.walls.size, boxes: ray.boxes.size });
 			this.#label(labels, 'ray ' + ray.number, text, ray.a.x + (ray.b.x - ray.a.x) * 0.62, ray.a.y + (ray.b.y - ray.a.y) * 0.62 + 6 * u);
 		}
-		if (lights && isometric && !lights.error) {
-			// each traced light at its height, on a stem down to the floor under it
-			for (const light of lights.lights ?? []) {
-				const at = lifted(light, light.z);
-				const [r, g, b] = (light.color ?? [1, 1, 1]).map((part) => Math.round(255 * Math.min(Math.max(part, 0), 1)));
-				parts.rays.lineStyle({ width: u, color: LIGHT, alpha: 0.8 });
-				line(parts.rays, light, at);
-				dot(parts.rays, light, 2 * u, LIGHT, 0.8);
-				parts.rays.lineStyle({ width: u, color: DARK }).beginFill((r << 16) | (g << 8) | b).drawCircle(at.x, at.y, 5 * u).endFill();
-			}
+		// each traced light at its height, on a stem down to the floor under it
+		for (const { what, numbers } of standing) {
+			if (what !== 'lamp') continue;
+			const [x, y, liftedX, liftedY, r, g, b] = numbers;
+			parts.rays.lineStyle({ width: u, color: LIGHT, alpha: 0.8 }).moveTo(x, y).lineTo(liftedX, liftedY);
+			dot(parts.rays, { x, y }, 2 * u, LIGHT, 0.8);
+			parts.rays.lineStyle({ width: u, color: DARK }).beginFill((Math.round(255 * r) << 16) | (Math.round(255 * g) << 8) | Math.round(255 * b)).drawCircle(liftedX, liftedY, 5 * u).endFill();
 		}
 		if (lights) {
 			const text = lights.error

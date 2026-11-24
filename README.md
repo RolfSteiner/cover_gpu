@@ -4,6 +4,10 @@ A Foundry VTT module, **Cover: Quadtree View** (id `cover-quadtree-view`), and t
 library it runs on. The library is written in [daslang](https://daslang.io/), compiled to
 WebAssembly, and does its ray tests on the graphics card through WebGL 2.
 
+Everything that is worked out is worked out by the library. The module's JavaScript reads the
+scene from Foundry, says when something has to be worked out again, and puts the answers where
+Foundry draws from them (see [Who does what](#who-does-what)).
+
 What the module does, for Foundry 14 (written against 14.370) with the pf2e system:
 
 - **Path traced light.** The light of the scene's light sources is path traced in place of
@@ -77,16 +81,37 @@ traced light at its height. Token and tile art stays flat on the map.
 
 | Path | What it is |
 |---|---|
-| `src/test_local_gpu.das` | The script library: ray tests, cover test, path tracer (the shaders are in it). |
+| `src/test_local_gpu.das` | The script library: ray tests, cover test, path tracer (the shaders are in it), where the light counts as lit, and the functions a caller reaches the three files below by. |
+| `src/sight.das` | Single lines of sight through a scene with heights, and what is seen in mirrors. |
+| `src/view3d.das` | The scene in perspective: the camera, what it sees as triangles and lines, and what the mouse is on. |
+| `src/isometric.das` | The outlines of what stands on the scene when it is looked at from the side. |
 | `module/` | The Foundry module. After a build it is complete and can be copied into a data folder. |
 | `module/lib/test_local_gpu_api.js` | The JavaScript wrapper over the built library. |
 | `module/scripts/` | The module's own code; each file says at its top what it is for. |
 | `build.ps1` | Builds the library into `module/lib` and can install the module. |
 | `daslang/` | The daslang the library is built with: a git submodule, the fork [RolfSteiner/daScript](https://github.com/RolfSteiner/daScript) at a fixed commit. |
-| `test/` | Two pages that check the library and the module in a browser, without Foundry running. |
+| `test/` | Two pages that check the library and the module in a browser, without Foundry running, and a run through the module to compare two states of it. |
 
 The built library (`module/lib/test_local_gpu_lib.mjs` and `.wasm`, about 10 MB) is not kept in
 the repository. A fresh checkout has to be built before the module works.
+
+## Who does what
+
+| | The library (daslang) | The module's JavaScript |
+|---|---|---|
+| Light | Path traces the picture; turns a light as Foundry describes it (cone, softness, color and its strength, dim level) into what the tracer takes; reads off the picture where the light counts as lit, and answers for a place. | Reads the light sources, decides when to trace, puts the pictures into Foundry's lighting and vision mask. |
+| Sight | Follows a line of sight past walls and through floors; finds the way by a row of mirrors; names the places of a token that are looked at. | Reads the walls and surfaces; asks Foundry's detection modes about range and angle. |
+| Mirrors | Says where to look at a mirror, cuts it into the parts that are seen, mirrors the place looked from, and works out the outline of each view. | Asks a view of Foundry's whether it holds a place; makes the vision sources. |
+| Cover | The cover test, with a size per target, and which point of the source sees most. | Reads the tokens; draws the result on the map. |
+| Isometric view | How the map lies on the screen; the outlines of tokens, walls, floors and lights, in drawing order. | Turns Foundry's canvas; draws the outlines with PIXI. |
+| 3D view | The camera and how it follows the mouse; every triangle and line of a frame; what the mouse is on; where Foundry's own view has to go. | The canvas and its WebGL calls, the pictures as textures, the mouse events. |
+
+What is left of arithmetic in JavaScript is of the kind `x * pixelsPerUnit`: turning what
+Foundry says into what the library takes, and sizes and colors of what PIXI draws.
+
+The library keeps what it is given between calls where it is asked often: the walls for lines
+of sight, the lit places, the scene and the camera of the 3D view. `module/lib/test_local_gpu_api.js`
+works nothing out; it copies numbers into the library's memory and back.
 
 ## Building
 
@@ -151,13 +176,22 @@ node test\server.mjs 8377 foundry=G:\Programming\Foundry\FoundryVTT-Node-14.370
 
 - `http://127.0.0.1:8377/test/library.html` checks the built library: rays, cover and the light
   that comes straight from the sources against answers worked out in plain JavaScript, and the
-  light that is thrown back for what has to hold of it. The page lists its checks, each with
-  `ok`, and `allOk` at the end. With `old=<folder of an earlier build of the library>` added to
-  the command, it also checks that a map without heights gives what that build gave.
+  light that is thrown back for what has to hold of it; lines of sight and views in mirrors
+  against the JavaScript the module used for them before (`test/reference.mjs`); the lit
+  places, the outlines of the isometric view and the camera of the 3D view. The page lists its
+  checks, each with `ok`, and `allOk` at the end. With `old=<folder of an earlier build of the
+  library>` added to the command, it also checks that a map without heights gives what that
+  build gave.
 - `http://127.0.0.1:8377/test/module.html` runs the module outside Foundry: real PIXI and
   Foundry's quadtree class from the installation named by `foundry=`, stand-ins for the rest
   (`test/visioner` stands in for PF2E Visioner). It sets a scene up and leaves handles in
   `window.h` to try things from the browser's console.
+- `test/scenario.mjs` runs through the module on that page (sight over walls and in mirrors,
+  the traced light, cover, a ray, both views) and returns a digest of what the module answered
+  and drew; `compare` says where two digests differ. To compare with an earlier state of the
+  repository, check that state out somewhere, build its library, serve it with
+  `before=<that folder>` and `before/pf2e-visioner=<this repository>\test\visioner` added to
+  the command, and run the scenario on `module.html?module=/before/module` as well.
 
 Neither page stands in for a try in Foundry itself.
 

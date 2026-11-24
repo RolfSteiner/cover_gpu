@@ -13,7 +13,7 @@
 const FILES = ['test_local_gpu_api.js', 'test_local_gpu_lib.mjs', 'test_local_gpu_lib.wasm'];
 
 /** What the scripts of this module call on the library. */
-const NEEDED = ['test', 'testCover', 'traceLights', 'readPicture', 'canvas'];
+const NEEDED = ['test', 'testCover', 'traceLights', 'readPicture', 'canvas', 'litMap', 'setSight', 'standing', 'view'];
 
 const address = (file) => new URL(`../lib/${file}`, import.meta.url);
 

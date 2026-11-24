@@ -9,6 +9,9 @@ require daslib/math
 require daslib/math_boost
 require daslib/safe_addr
 require opengl/opengl_boost
+require sight
+require view3d
+require isometric
 
 // Tests of rays against the walls of a map, a cover test and a path tracer for the map's light,
 // where every test of a ray against the walls runs on the graphics card through WebGL 2.
@@ -30,6 +33,11 @@ require opengl/opengl_boost
 //  - What comes back is read with glReadPixels. Everything that is not a ray-against-walls
 //    test stays in this script: reading the tree, choosing the rays, trimming walls to their
 //    visible part (visibleEnd), and putting the results together.
+//
+// Besides these there is what needs no graphics card, each in a file of its own, with the
+// functions a caller reaches them by at the end of this file: single lines of sight through
+// the map and what is seen in mirrors (sight.das), the scene in perspective (view3d.das) and
+// the outlines of the scene looked at from the side (isometric.das).
 //
 // test_light_adaptive can also draw a picture of the light, found by path tracing, onto the
 // canvas of the WebGL context, and trace_lights draws such a picture for any number of light
@@ -463,10 +471,22 @@ vec3 arriving(int k, vec3 place, vec3 normal, out vec3 toward) \{
 //    spreads the mirrored light around the mirrored direction, up to a quarter turn to every
 //    side at 0, which no longer looks like a mirror at all.
 // At a face the path goes on as mirrored or as scattered light, by chance in the shares the
-// two have. The light the point gets straight from the sources counts by both. A source is a
-// point, which an exact mirror would never be found to show; for that the mirror is taken to
-// spread by at least LEAST_SPREAD. A flat surface is a face that is neither metallic nor
-// smooth.
+// two have. The light the point gets straight from the sources counts by both. A flat surface
+// is a face that is neither metallic nor smooth.
+//
+// A source is a point, and a path would have to leave a mirror exactly towards it to find the
+// source in the mirror: the sharper the mirror, the fewer paths do, and the more light each of
+// them brings. A few very bright paths among many dark ones are dots in the picture, which
+// smoothing only spreads into blotches. So what a place sees of a source in a sharp mirror is
+// not left to the paths. A face that spreads its light by less than SOFT counts as sharp:
+//  - The light that comes from a source by one such face straight to the place is worked out
+//    (see imaged): the source is mirrored at the wall, and the place gets its light when the
+//    line from the place to the mirrored source passes the wall, on a part of it that throws
+//    light back, with nothing in the way before or behind. A path that meets such a face first
+//    adds nothing for the mirror there.
+//  - Further along a path, where a source is seen in such a face from another wall or from
+//    another mirror, the face is taken to spread its light by LATER: that light has been
+//    thrown about once already, and how sharp it was is not seen in it.
 //
 // Because the walls have height, the light they throw back thins out by itself with the
 // distance: a lit stretch of wall takes up less of what a place sees the farther away it is. A
@@ -486,7 +506,8 @@ const float GOLDEN = 0.61803399;
 const float NUDGE = 0.05;
 const float BASE = 0.8;
 const float PLAIN = 0.04;
-const float LEAST_SPREAD = 0.1;
+const float SOFT = 0.5;
+const float LATER = 1.0;
 
 // The share of mirrored light that leaves `off` away from the mirrored direction, for a mirror
 // that spreads its light by `spread` to every side, both as angles: most in the mirrored
@@ -507,6 +528,75 @@ vec3 tilted(vec3 n, float tilt, float about) \{
 	vec3 t;
 	beside(n, s, t);
 	return normalize(n * cos(tilt) + (s * cos(TURN * about) + t * sin(TURN * about)) * sin(tilt));
+\}
+
+// how far a face of the given smoothness spreads the light it mirrors, as an angle
+float spreadOf(float smoothness) \{
+	return 1.5707963 * (1.0 - smoothness) * (1.0 - smoothness);
+\}
+
+// true when no wall but `own` and no flat surface stops a path on its way from one place to another
+bool open(vec3 from, vec3 to, int own) \{
+	bool clear = true;
+	int limited = 0;
+	for (int i = 0; i < u_wallCount; i++) \{
+		if (i == own) continue;
+		float at;
+		vec4 wall;
+		int met = meets(from, to - from, i, from.xy, 0.0, false, at, wall);
+		if (met == 2) limited++;
+		if (met == 1 || limited > 1) \{
+			clear = false;
+			break;
+		\}
+	\}
+	if (!clear) return false;
+	for (int i = 0; i < u_surfaceCount; i++) \{
+		float at;
+		if (hitsSurface(from, to - from, i, at)) \{
+			clear = false;
+			break;
+		\}
+	\}
+	return clear;
+\}
+
+// The light a place gets from the sources by one sharp mirror each. A source seen in a mirror
+// is seen where the source mirrored at the wall is, through the wall. The light is what the
+// point of the wall on that line gets from the source, times the share the face mirrors at
+// that angle; and it has thinned out as the light of a point does that is as far away as the
+// whole way is, of which the wall is only part.
+vec3 imaged(vec3 place) \{
+	vec3 sum = vec3(0.0);
+	for (int i = 0; i < u_wallCount; i++) \{
+		vec4 faces = texelFetch(u_walls, ivec2(2, i), 0);
+		if (min(spreadOf(faces.y), spreadOf(faces.w)) >= SOFT) continue;
+		vec4 wall = texelFetch(u_walls, ivec2(0, i), 0);
+		vec4 stands = texelFetch(u_walls, ivec2(3, i), 0);
+		float long2 = dot(wall.zw, wall.zw);
+		if (long2 <= 0.0) continue;
+		for (int k = 0; k < u_lightCount; k++) \{
+			vec4 where = texelFetch(u_lights, ivec2(0, k), 0);
+			vec2 foot = wall.xy + wall.zw * dot(where.xy - wall.xy, wall.zw) / long2;
+			vec3 d = vec3(2.0 * foot - where.xy, texelFetch(u_lights, ivec2(3, k), 0).w) - place;
+			float at;
+			if (!hitsWall(place, d, wall, at) || at <= 0.0 || at >= 1.0) continue;
+			vec3 point = place + d * at;
+			if (point.z < stands.x || point.z > min(stands.y, stands.z)) continue;
+			vec3 along = normalize(d);
+			vec2 face = along.x * wall.w - along.y * wall.z < 0.0 ? faces.xy : faces.zw;
+			if (spreadOf(face.y) >= SOFT) continue;
+			vec3 normal = vec3(normalize(vec2(-wall.w, wall.z)), 0.0);
+			if (dot(normal, along) > 0.0) normal = -normal;
+			if (!open(place, point, i)) continue;
+			vec3 toward;
+			vec3 light = arriving(k, point + normal * NUDGE, normal, toward);
+			float straight = mix(PLAIN, BASE, face.x);
+			float shiny = straight + (1.0 - straight) * pow(1.0 - clamp(-dot(normal, along), 0.0, 1.0), 5.0);
+			sum += shiny * light * (1.0 - at) * (1.0 - at);
+		\}
+	\}
+	return sum;
 \}
 
 void main() \{
@@ -585,14 +675,18 @@ void main() \{
 			float straight = mix(PLAIN, BASE, face.x);
 			float shiny = straight + (1.0 - straight) * pow(1.0 - steep, 5.0);
 			float matt = BASE * (1.0 - face.x) * (1.0 - shiny);
-			float spread = 1.5707963 * (1.0 - face.y) * (1.0 - face.y);
+			float spread = spreadOf(face.y);
+			// what a sharp mirror shows of the sources: worked out for the first face of a path
+			// (see imaged), and softened from there on
+			bool sharp = spread < SOFT;
 			vec3 mirror = along - 2.0 * dot(along, normal) * normal;
 			from = from + d * best + normal * NUDGE;
 			for (int k = 0; k < u_lightCount; k++) \{
 				vec3 toward;
 				vec3 light = arriving(k, from, normal, toward);
 				float off = acos(clamp(dot(mirror, toward), -1.0, 1.0));
-				bounced += carried * (matt * dot(normal, toward) / HALF_TURN + shiny * mirrored(off, max(spread, LEAST_SPREAD))) * light;
+				float shown = sharp ? (b == 0 ? 0.0 : mirrored(off, LATER)) : mirrored(off, spread);
+				bounced += carried * (matt * dot(normal, toward) / HALF_TURN + shiny * shown) * light;
 			\}
 			if (chance(state) * (shiny + matt) < shiny) \{
 				// mirrored: off the mirrored direction more often by little than by much, as
@@ -609,7 +703,7 @@ void main() \{
 			if (carried <= 0.0) break;
 		\}
 	\}
-	o_color = vec4(stored(TURN * bounced / float(u_samples)), 1.0);
+	o_color = vec4(stored(TURN * bounced / float(u_samples) + imaged(place)), 1.0);
 \}
 "
 
@@ -618,9 +712,22 @@ void main() \{
 // the far side of a wall that stands on the floor is left out, so light never seeps through
 // such a wall, and so is a pixel whose floor lies at another height: the light on a raised
 // floor is not the light on the ground beside it.
+//
+// Where little light is thrown back, few of a pixel's paths find any of it, so that the little
+// there is comes out in spots; and a pixel holds light to the power of 1 / GAMMA, which shows
+// faint light, and its spots, far brighter than it is. So after the runs that were asked for,
+// further runs go on smoothing where the light is dim (u_dim): a pixel whose averaged light is
+// below DIM_LOW takes the average, one above DIM_HIGH keeps what it had, and in between it
+// takes part of each. Light that is bright enough to show how it lies stays as sharp as it was.
+// A run that looks far leaves its own marks where a wall ends, since of two pixels next to each
+// other one may be averaged with what lies past the wall and the other not; the last of these
+// runs look near again and take those marks out.
 let SMOOTH_SOURCE = "
 uniform sampler2D u_picture;
 uniform int u_step;
+uniform int u_dim;
+const float DIM_LOW = 0.004;
+const float DIM_HIGH = 0.03;
 
 float share(int apart) \{
 	return apart == 0 ? 0.375 : (apart == 1 ? 0.25 : 0.0625);
@@ -668,7 +775,12 @@ void main() \{
 			shares += part;
 		\}
 	\}
-	o_color = vec4(stored(sum / shares), 1.0);
+	vec3 evened = sum / shares;
+	if (u_dim != 0) \{
+		float most = max(evened.r, max(evened.g, evened.b));
+		evened = mix(evened, unstored(texelFetch(u_picture, pixel, 0).rgb), smoothstep(DIM_LOW, DIM_HIGH, most));
+	\}
+	o_color = vec4(stored(evened), 1.0);
 \}
 "
 
@@ -712,6 +824,12 @@ let HALF_LIGHT = 0.15
 // Step 2 of the picture is run at most this many times; each run looks twice as far.
 let MOST_SMOOTHING = 6
 
+// After those runs, step 2 is run this many times more for the dim light only (see
+// SMOOTH_SOURCE), each looking twice as far again, and then this many times looking near again,
+// the last at the pixels next to each one.
+let DIM_SMOOTHING = 2
+let DIM_CLOSING = 2
+
 // Step 3 takes the light straight from the sources at this many places of a pixel's side at most.
 let MOST_FINE = 4
 
@@ -747,6 +865,24 @@ var entriesTexture: uint
 var raysTexture: uint
 var resultTexture: uint
 var resultTarget: uint
+
+// The picture of the light that was drawn last: how many pixels it is, and the rectangle of
+// the map it covers (x, y, width, height).
+var pictureWidth = 0
+var pictureHeight = 0
+var pictureArea: float4
+
+// Where the light of that picture counts as lit (see read_lit): per pixel, top row first, 0
+// not lit, 1 as dim light, 2 as bright light; and what the picture covered when it was read.
+var litLevels: array<uint8>
+var litWidth = 0
+var litHeight = 0
+var litArea: float4
+
+// What the functions at the end of this file hand back as a list of numbers (see the results).
+var resultDoubles: array<double>
+var resultFloats: array<float>
+var resultInts: array<int>
 
 // Frees what the previous call left behind, strings included: the JSON keys and text it parsed
 // and the result it returned. The caller runs it before each call, after it has copied the
@@ -847,7 +983,7 @@ def test_light_adaptive(var treeS:string; var p:float3; width:int; height:int; s
 // level at the height `floor`; where a flat surface that stops movement lies over a place, at
 // the height of the ground or above it and below `ceiling`, the highest such surface is the
 // floor there (see LIGHT_SOURCE). `lights` points at the first of count * LIGHT_PIXELS float4 that lie
-// one after the other in memory, four per source, as LIGHT_SOURCE describes them. Each wall
+// one after the other in memory, four per source, as sourcesOf reads them. Each wall
 // acts on the light the way it says, between its bottom and its top (see wallOf and
 // LIGHT_SOURCE); walls that do nothing to light are left out. The flat surfaces that stop light
 // stop it. Light that walls and surfaces throw back is followed for up to `bounces` of them
@@ -866,21 +1002,57 @@ def trace_lights(var treeS:string; lights:float4?; count:int; width:int; height:
 	var inscope walls <- wallsOf(entries, true, floor, wallHeight)
 	var inscope flats <- flatsOf(scene.flats, STOPS_LIGHT)
 	var inscope floors <- floorsOf(scene.flats, floor, ceiling)
-	var inscope sources: array<float4>
-	for i in range(max(count, 0) * LIGHT_PIXELS)
-		unsafe
-			push(sources, lights[i])
+	var inscope sources <- sourcesOf(lights, count)
+	let sourceCount = length(sources) / LIGHT_PIXELS
 	let wallCount = length(walls) / WALL_PIXELS
 	let flatCount = length(flats) / FLAT_PIXELS
 	if width > 0 && height > 0
-		tracePicture(scene.tree.bounds, walls, wallCount, sources, max(count, 0), flats, floors, width, height, samples, bounces, smoothing, fine, floor)
-	return sprint_json(Traced(lights = max(count, 0), walls = wallCount, surfaces = flatCount), false)
+		tracePicture(scene.tree.bounds, walls, wallCount, sources, sourceCount, flats, floors, width, height, samples, bounces, smoothing, fine, floor)
+	return sprint_json(Traced(lights = sourceCount, walls = wallCount, surfaces = flatCount), false)
+
+// The light sources as the path tracer takes them (see LIGHT_SOURCE), from the way a caller
+// says them: `lights` points at the first of count * LIGHT_PIXELS float4, four per source.
+//  - x, y, how far its light reaches, and how far its bright light does, in map units;
+//  - its color (red, green, blue, 0 to 1), and 1 when walls and surfaces act on it;
+//  - the width of its cone in degrees (360: all round), where the cone points, in degrees
+//    clockwise from straight down, how soft its edges are (0 to 1), and how much of its color
+//    its light has (0 to 1; the rest of it is white);
+//  - the size of the source itself, how bright its dim light looks next to its bright light
+//    (0 to 1), 1 for a source of which only the light that is thrown back is wanted, and its
+//    height.
+// A source whose light reaches nowhere takes no part.
+def sourcesOf(lights: float4?; count: int) : array<float4>
+	var sources: array<float4>
+	for i in range(max(count, 0))
+		var spot: float4
+		var tint: float4
+		var cone: float4
+		var more: float4
+		unsafe
+			spot = lights[i * LIGHT_PIXELS]
+			tint = lights[i * LIGHT_PIXELS + 1]
+			cone = lights[i * LIGHT_PIXELS + 2]
+			more = lights[i * LIGHT_PIXELS + 3]
+		if !(spot.z > 0.0)
+			continue
+		let strength = clamp(cone.w, 0.0, 1.0)
+		let middle = (cone.y + 90.0) * PI / 180.0
+		// the same curve Foundry puts the setting through before its shaders get it
+		let soft = (cos(PI * pow(clamp(cone.z, 0.0, 1.0), 1.5)) - 1.0) / -2.0
+		push(sources, float4(spot.x, spot.y, spot.z, min(abs(spot.w), spot.z)))
+		push(sources, float4(1.0 + (tint.x - 1.0) * strength, 1.0 + (tint.y - 1.0) * strength, 1.0 + (tint.z - 1.0) * strength, tint.w))
+		push(sources, cone.x >= 360.0 ? float4(0.0, 0.0, -2.0, soft) : float4(cos(middle), sin(middle), cos(cone.x * PI / 360.0), soft))
+		// a pixel holds light to the power of 1 / GAMMA, and so does how bright dim light looks
+		push(sources, float4(more.x, pow(clamp(more.y, 0.0, 1.0), 2.2), more.z, more.w))
+	return <- sources
 
 // How much of each of several round targets the walls hide from a round source. source is the
 // centre of the source, at the height it looks from; targets points at the first of `count`
-// targets that lie one after the other in memory, each the centre of the target on the map (x,
-// y), its bottom (z) and its top (w); ds and da are the diameters of the source and of every
-// target, in map units. Returns one result per target, in the order of the targets.
+// targets that lie one after the other in memory, five numbers each: the centre of the target
+// on the map (x, y), its bottom, its top and its diameter; ds is the diameter of the source,
+// all in map units. Returns one result per target, in the order of the targets. With `keep`
+// other than 0 the results are also what the view in perspective shows as the cover test from
+// then on (see view3d.das).
 //
 // A target is an upright cylinder, and what is hidden of it is a share of what a point of the
 // source sees of it: of the cone of all lines of sight from the point to the target.
@@ -905,7 +1077,7 @@ def trace_lights(var treeS:string; lights:float4?; count:int; width:int; height:
 //
 // The directions of every point of every target go to the graphics card in one batch.
 [export]
-def test_cover(var treeS:string; var source:float3; targets:float4?; count:int; ds:float; da:float; n:int; m:int) : string
+def test_cover(var treeS:string; var source:float3; targets:float?; count:int; ds:float; n:int; m:int; keep:int) : string
 	var inscope scene <- readScene(treeS)
 	var inscope entries: array<Entry>
 	flatten(scene.tree, entries, true)
@@ -916,8 +1088,10 @@ def test_cover(var treeS:string; var source:float3; targets:float4?; count:int; 
 	var inscope rays: array<float4>
 	for i in range(count)
 		var target: float4
+		var da = 0.0
 		unsafe
-			target = targets[i]
+			target = float4(targets[i * 5], targets[i * 5 + 1], targets[i * 5 + 2], targets[i * 5 + 3])
+			da = targets[i * 5 + 4]
 		var cover <- coverOf(source, target, ds, da, n, m, rays)
 		emplace(covers, cover)
 	var inscope masks <- castCover(rays, length(entries), flatCount)
@@ -925,7 +1099,7 @@ def test_cover(var treeS:string; var source:float3; targets:float4?; count:int; 
 	var next = 0
 	for cover in covers
 		var least = 1.0
-		for point in cover.points
+		for point, place in cover.points, count()
 			// what the rays of the point stand for together, and what the blocked ones do
 			var whole = 0.0lf
 			var hidden = 0.0lf
@@ -959,8 +1133,19 @@ def test_cover(var treeS:string; var source:float3; targets:float4?; count:int; 
 					push(point.runs, CoverRun(blocked = stopped == cover.heights, share = share, mask = mask, from = end, to = end))
 			if whole > 0.0lf
 				point.obstructed = float(hidden / whole)
-			least = min(least, point.obstructed)
-		cover.obstructed = least
+			// the point with the best view; of two that see as much, the first
+			if place == 0 || point.obstructed < least
+				cover.best = place
+			least = place == 0 ? point.obstructed : min(least, point.obstructed)
+		cover.obstructed = min(least, 1.0)
+	if keep != 0
+		clearCovers()
+		for cover in covers
+			if empty(cover.points)
+				continue
+			addCover(cover.points[cover.best].at, cover.lineA, cover.lineB, float2(cover.target.x, cover.target.y), cover.radius, cover.target.z, cover.top, cover.heights)
+			for run in cover.points[cover.best].runs
+				addRun(float2(run.from.x, run.from.y), float2(run.to.x, run.to.y), run.mask)
 	return sprint_json(covers, false)
 
 // How many of the lowest `count` bits of mask are set.
@@ -978,6 +1163,7 @@ def coverOf(source: float3; target: float4; ds: float; da: float; n: int; m: int
 	var cover: Cover
 	cover.target = float3(target.x, target.y, target.z)
 	cover.top = target.w
+	cover.radius = da * 0.5
 	cover.heights = clamp(m, 1, MOST_HEIGHTS)
 	let toTarget = float2(target.x - source.x, target.y - source.y)
 	let apart = length(toTarget)
@@ -1432,6 +1618,9 @@ def castCover(var rays: array<float4>; entryCount: int; flatCount: int) : array<
 // is taken at fine by fine places of each pixel.
 def tracePicture(area: AABB; var walls: array<float4>; wallCount: int; var lights: array<float4>; lightCount: int; var flats: array<float4>; var floors: array<float4>; width, height, samples, bounces, smoothing, fine: int; floor: float)
 	gpuInit()
+	pictureWidth = width
+	pictureHeight = height
+	pictureArea = float4(area.min.x, area.min.y, area.max.x - area.min.x, area.max.y - area.min.y)
 	// a texture needs something to hold even when there is no wall or no source
 	if empty(walls)
 		resize(walls, WALL_PIXELS)
@@ -1468,10 +1657,14 @@ def tracePicture(area: AABB; var walls: array<float4>; wallCount: int; var light
 		glDrawArrays(GL_TRIANGLES, 0, 3)
 		lightProgram(smoothProgram, area, wallCount, lightCount, flatCount, floorCount, width, height, floor)
 		glUniform1i(glGetUniformLocation(smoothProgram, "u_picture"), 5)
-		for run in range(clamp(smoothing, 0, MOST_SMOOTHING))
+		// a picture that is not to be smoothed is left as it is, its dim light too
+		let runs = clamp(smoothing, 0, MOST_SMOOTHING)
+		let all = runs > 0 ? runs + DIM_SMOOTHING + DIM_CLOSING : 0
+		for run in range(all)
 			glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, next, 0)
 			glBindTexture(GL_TEXTURE_2D, held)
-			glUniform1i(glGetUniformLocation(smoothProgram, "u_step"), 1 << run)
+			glUniform1i(glGetUniformLocation(smoothProgram, "u_step"), 1 << (run < runs + DIM_SMOOTHING ? run : all - 1 - run))
+			glUniform1i(glGetUniformLocation(smoothProgram, "u_dim"), run >= runs ? 1 : 0)
 			glDrawArrays(GL_TRIANGLES, 0, 3)
 			swap(held, next)
 	else
@@ -1686,16 +1879,19 @@ struct CoverPoint
 	obstructed: float
 	runs: array<CoverRun>
 
-// What test_cover returns for one target: its centre at its bottom, its top, how many rays
-// were sent up and down in each direction, the ends of the source's diameter that lies across the line to it,
-// the smallest share of the target any of the points cannot see, and each point's result.
+// What test_cover returns for one target: its centre at its bottom, its top, its radius, how
+// many rays were sent up and down in each direction, the ends of the source's diameter that
+// lies across the line to it, the smallest share of the target any of the points cannot see,
+// which of the points that is (counted from 0), and each point's result.
 struct Cover
 	target: float3
 	top: float
+	radius: float
 	heights: int
 	lineA: float3
 	lineB: float3
 	obstructed: float
+	best: int
 	points: array<CoverPoint>
 
 // What trace_lights returns: how many light sources, walls and triangles of flat surfaces took
@@ -1724,3 +1920,270 @@ struct Znode
 	objects: array<Zobjects>
 	bounds: AABB
 	nodes: array<Znode>
+
+// --- where the light counts as lit ---------------------------------------------------------
+
+// Works out from the picture of the light on the canvas where its light counts as lit, and
+// keeps that for lit_at. `dim` is how bright dim light looks next to bright light (0 to 1) and
+// `share` the share of that from which a place counts as lit; a place counts as brightly lit
+// from half way between how bright dim light looks and how bright bright light does. `image`
+// points at four bytes per pixel of the picture, which are filled as a picture of the lit
+// places, top row first: red and solid where a place is lit, nothing elsewhere. Returns how
+// many pixels the picture has, 0 when there is none.
+[export]
+def read_lit(dim: double; share: double; var image: uint8?) : int
+	let width = pictureWidth
+	let height = pictureHeight
+	if width <= 0 || height <= 0
+		return 0
+	gpuInit()
+	var inscope data: array<uint8>
+	resize(data, width * height * 4)
+	glBindFramebuffer(GL_FRAMEBUFFER, 0u)
+	unsafe
+		glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, addr(data[0]))
+	let least = max(1, int(floor(255.0lf * dim * share + 0.5lf)))
+	let bright = int(floor(255.0lf * (dim + 1.0lf) / 2.0lf + 0.5lf))
+	resize(litLevels, width * height)
+	for y in range(height)
+		// the picture comes bottom row first
+		var from = (height - 1 - y) * width * 4
+		var to = y * width
+		for x in range(width)
+			let most = max(max(int(data[from]), int(data[from + 1])), int(data[from + 2]))
+			let lit = most >= least
+			litLevels[to] = uint8(most >= bright ? 2 : (lit ? 1 : 0))
+			unsafe
+				image[to * 4] = uint8(lit ? 255 : 0)
+				image[to * 4 + 1] = uint8(0)
+				image[to * 4 + 2] = uint8(0)
+				image[to * 4 + 3] = uint8(lit ? 255 : 0)
+			from += 4
+			to ++
+	litWidth = width
+	litHeight = height
+	litArea = pictureArea
+	return width * height
+
+// How bright the light read by read_lit makes a place of the map: 0 not lit, 1 as dim light, 2
+// as bright light; 0 outside the picture, and -1 while nothing was read.
+[export]
+def lit_at(x: double; y: double) : int
+	if litWidth <= 0 || litHeight <= 0
+		return -1
+	let px = int(floor((x - double(litArea.x)) / double(litArea.z) * double(litWidth)))
+	let py = int(floor((y - double(litArea.y)) / double(litArea.w) * double(litHeight)))
+	if px < 0 || py < 0 || px >= litWidth || py >= litHeight
+		return 0
+	return int(litLevels[py * litWidth + px])
+
+// --- the results ---------------------------------------------------------------------------
+
+// Where the numbers are that the function called last handed back as a list: valid until the
+// next call.
+[export]
+def result_doubles : double?
+	if empty(resultDoubles)
+		push(resultDoubles, 0.0lf)
+	unsafe
+		return addr(resultDoubles[0])
+
+[export]
+def result_floats : float?
+	if empty(resultFloats)
+		push(resultFloats, 0.0)
+	unsafe
+		return addr(resultFloats[0])
+
+[export]
+def result_ints : int?
+	if empty(resultInts)
+		push(resultInts, 0)
+	unsafe
+		return addr(resultInts[0])
+
+// --- lines of sight and mirrors (sight.das) ------------------------------------------------
+
+// How many numbers a wall and a triangle of a flat surface are for set_sight.
+let SIGHT_WALL = 13
+let SIGHT_FLAT = 7
+
+// Takes the walls and the flat surfaces that can be in the way of a line of sight. `wallData`
+// holds SIGHT_WALL numbers per wall: its two ends (x and y each), what Foundry's Edge says of it
+// for sight (its EDGE_SENSE_TYPES value, its EDGE_DIRECTIONS value and its threshold in map
+// units), its bottom and its top (without end where it names none), and how metallic and how
+// smooth its left face is, then its right face. `flatData` holds SIGHT_FLAT numbers per
+// triangle of a surface that stops sight: its height, and the x and y of three corners. The
+// four sides of the rectangle (x, y, width, height) end every line of sight as walls do.
+// Returns 1 when nothing has a height: every line of sight is then as on a flat map.
+[export]
+def set_sight(wallData: double?; wallCount: int; flatData: double?; flatCount: int; x: double; y: double; width: double; height: double) : int
+	clearSight()
+	for i in range(wallCount)
+		let at = i * SIGHT_WALL
+		unsafe
+			addWall(wallData[at], wallData[at + 1], wallData[at + 2], wallData[at + 3], int(wallData[at + 4]), int(wallData[at + 5]), wallData[at + 6],
+				wallData[at + 7], wallData[at + 8], wallData[at + 9], wallData[at + 10], wallData[at + 11], wallData[at + 12])
+	if width > 0.0lf && height > 0.0lf
+		// without end, down and up
+		let none = 1000000000000000000000000000000.0lf * 1000000000000000000000000000000.0lf
+		let cornerX = [[double x; x + width; x + width; x]]
+		let cornerY = [[double y; y; y + height; y + height]]
+		for side in range(4)
+			addWall(cornerX[side], cornerY[side], cornerX[(side + 1) % 4], cornerY[(side + 1) % 4], SENSE_NORMAL, 0, 0.0lf, -none, none, 0.0lf, 0.0lf, 0.0lf, 0.0lf)
+	for i in range(flatCount)
+		let at = i * SIGHT_FLAT
+		unsafe
+			addFlat(flatData[at], flatData[at + 1], flatData[at + 2], flatData[at + 3], flatData[at + 4], flatData[at + 5], flatData[at + 6])
+	return isFlat() ? 1 : 0
+
+// 1 when sight gets from one place to one of some others: straight, with `chain` 0, or by way
+// of up to `chain` mirrors in a row. `places` holds x, y and height of each place looked at.
+[export]
+def sight_clear(fx: double; fy: double; fz: double; places: double?; count: int; chain: int) : int
+	for i in range(count)
+		var x = 0.0lf
+		var y = 0.0lf
+		var z = 0.0lf
+		unsafe
+			x = places[i * 3]
+			y = places[i * 3 + 1]
+			z = places[i * 3 + 2]
+		if chain > 0 ? byMirrors(fx, fy, fz, x, y, z, chain) : !stopped(fx, fy, fz, x, y, z, -1, -1)
+			return 1
+	return 0
+
+// The mirrors that stand at a height, as the places of their walls in what set_sight was
+// given: how many, and the places themselves as the result (see result_ints).
+[export]
+def sight_mirrors(eye: double) : int
+	mirrorsAt(eye, resultInts)
+	return length(resultInts)
+
+// The places a mirror is looked at for being seen from a place (see mirrorProbes of sight.das),
+// x and y in turn, as the result (see result_doubles). Returns how many places there are.
+[export]
+def mirror_probes(ox: double; oy: double; mirror: int) : int
+	mirrorProbes(ox, oy, mirror, resultDoubles)
+	return length(resultDoubles) / 2
+
+// The views a place has in a mirror (see mirrorViews of sight.das), as the result (see
+// result_doubles). `seen` holds one byte per place mirror_probes named, 1 where it is seen.
+// Returns how many numbers the result has.
+[export]
+def mirror_views(ox: double; oy: double; mirror: int; seen: uint8?; pieces: int; reach: double; eye: double) : int
+	var inscope flags: array<bool>
+	for i in range(pieces)
+		unsafe
+			push(flags, seen[i] != uint8(0))
+	mirrorViews(ox, oy, mirror, flags, reach, eye, resultDoubles)
+	return length(resultDoubles)
+
+// The places of a token another token looks at (see tokenPlaces of sight.das), x, y and height
+// in turn, as the result (see result_doubles). Returns how many places there are.
+[export]
+def token_places(cx: double; cy: double; w: double; h: double; bottom: double; top: double) : int
+	tokenPlaces(cx, cy, w, h, bottom, top, resultDoubles)
+	return length(resultDoubles) / 3
+
+// --- the scene in perspective (view3d.das) -------------------------------------------------
+
+[export]
+def view_scene(var text: string)
+	setScene(text)
+
+[export]
+def view_start(x: float; y: float; height: float; scale: float)
+	start(x, y, height, scale)
+
+[export]
+def view_stop
+	stop()
+
+[export]
+def view_frame(inputs: float?; tokens: float?; tokenCount: int; lights: float?; lightCount: int; flags: float?) : int
+	return frame(inputs, tokens, tokenCount, lights, lightCount, flags)
+
+[export]
+def view_head : float?
+	return headOf()
+
+[export]
+def view_verts : float?
+	return vertsOf()
+
+[export]
+def view_press(sx: float; sy: float)
+	press(sx, sy)
+
+[export]
+def view_release
+	release()
+
+[export]
+def view_drag(fromX: float; fromY: float; toX: float; toY: float)
+	drag(fromX, fromY, toX, toY)
+
+[export]
+def view_turn(dx: float; dy: float)
+	turnBy(dx, dy)
+
+[export]
+def view_zoom(delta: float; across: float)
+	zoomBy(delta, across)
+
+// Writes x and y of the place on the scene the mouse is at to `out`; 0 for the sky.
+[export]
+def view_scene_at(sx: float; sy: float; var out: float?) : int
+	var at: float2
+	if !sceneAt(sx, sy, at)
+		return 0
+	unsafe
+		out[0] = at.x
+		out[1] = at.y
+	return 1
+
+// Writes where on the screen a place on the ground is seen to `out` (0 to 1 both ways); 0 when
+// it is behind the camera.
+[export]
+def view_screen_at(x: float; y: float; var out: float?) : int
+	var at: float2
+	if !screenAt(x, y, at)
+		return 0
+	unsafe
+		out[0] = at.x
+		out[1] = at.y
+	return 1
+
+// Writes x and y of the place on the ground the camera looks at to `out`.
+[export]
+def view_looked_at(var out: float?)
+	let at = lookedAt()
+	unsafe
+		out[0] = at.x
+		out[1] = at.y
+
+// --- the scene looked at from the side (isometric.das) -------------------------------------
+
+// Writes how the map lies on the screen to `out`: a, b, c, d and det of lieOf of isometric.das,
+// then its `up` and its `across`, nine numbers.
+[export]
+def iso_lie(tilt: double; var out: float?)
+	let lie = lieOf(tilt)
+	unsafe
+		out[0] = lie.a
+		out[1] = lie.b
+		out[2] = lie.c
+		out[3] = lie.d
+		out[4] = lie.det
+		out[5] = lie.up.x
+		out[6] = lie.up.y
+		out[7] = lie.across.x
+		out[8] = lie.across.y
+
+// What stands on the map as shapes to draw (see shapes of isometric.das), as the result (see
+// result_floats). Returns how many numbers the result has.
+[export]
+def iso_shapes(tilt: double; ground: float; tall: float; bodies: float?; bodyCount: int; edges: float?; edgeCount: int; flats: float?; flatCount: int; lights: float?; lightCount: int) : int
+	shapes(tilt, ground, tall, bodies, bodyCount, edges, edgeCount, flats, flatCount, lights, lightCount, resultFloats)
+	return length(resultFloats)

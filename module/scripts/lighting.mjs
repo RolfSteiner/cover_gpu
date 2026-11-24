@@ -53,7 +53,11 @@
 //    system's too): it also says yes for a place that picture has filled (`isLit`; the wrapper
 //    on Foundry's function is in wrappers.mjs).
 // A place counts as lit when its traced light looks at least as bright as the setting
-// `litLevel` says, in shares of how bright dim light looks.
+// `litLevel` says, in shares of how bright dim light looks. The script library reads that off
+// its own picture (`litMap`) and answers for a place (`litAt`).
+//
+// What this file does is Foundry's side of it: reading the light sources, saying when to trace,
+// and putting the pictures where Foundry draws from them.
 //
 // The Foundry types named here are the ones of the pf2e system's declarations
 // (github.com/foundryvtt/pf2e, types/foundry): EffectsCanvasGroup in
@@ -115,8 +119,8 @@ export class PathTracedLighting {
 
 	/**
 	 * `{ count, walls, ms, error, traced, draft, lights }` of the last picture, or null while
-	 * switched off; `lights` says of each traced source where it is (`x`, `y`), how high (`z`)
-	 * and of what color.
+	 * switched off; `lights` says of each traced source where it is (`x`, `y`), how high (`z`),
+	 * of what color, and how much of that color its light has (`strength`).
 	 */
 	#info = null;
 
@@ -132,11 +136,10 @@ export class PathTracedLighting {
 	#placed = false;
 
 	/**
-	 * Where the traced light counts as lit, or null while there is no picture:
-	 * `{ width, height, lit, canvas, context, texture, sprite }`. `lit` holds per pixel of the
-	 * picture, top row first, how bright the place is: 0 not lit, 1 as dim light, 2 as bright
-	 * light. The canvas is filled where a place is lit, for the sprite that goes into Foundry's
-	 * vision mask.
+	 * The picture of where the traced light counts as lit, or null while there is none:
+	 * `{ width, height, canvas, context, texture, sprite }`. The canvas is filled where a place
+	 * is lit, for the sprite that goes into Foundry's vision mask. How bright a place is, the
+	 * library says (`litAt`).
 	 */
 	#mask = null;
 
@@ -201,11 +204,8 @@ export class PathTracedLighting {
 	 * @param {{x: number, y: number}} point
 	 */
 	isLit(point) {
-		const mask = this.#mask;
-		if (!mask || !this.#info?.traced || !this.#root) return false;
-		const x = Math.floor(((point.x - this.#root.x) / this.#root.width) * mask.width);
-		const y = Math.floor(((point.y - this.#root.y) / this.#root.height) * mask.height);
-		if (x >= 0 && y >= 0 && x < mask.width && y < mask.height && mask.lit[y * mask.width + x] > 0) return true;
+		if (!this.#mask || !this.#info?.traced || !this.#root) return false;
+		if (this.#cover.litAt(point.x, point.y) > 0) return true;
 		// the light that comes straight from an animated source is not in the picture
 		return this.#sources().some((source) => source.isAnimated && source.shape?.contains?.(point.x, point.y));
 	}
@@ -218,12 +218,9 @@ export class PathTracedLighting {
 	 * @returns {0|1|2|null}
 	 */
 	lightLevelAt(point) {
-		const mask = this.#mask;
-		if (!mask || !this.#info?.traced || !this.#root) return null;
-		const x = Math.floor(((point.x - this.#root.x) / this.#root.width) * mask.width);
-		const y = Math.floor(((point.y - this.#root.y) / this.#root.height) * mask.height);
-		if (x < 0 || y < 0 || x >= mask.width || y >= mask.height) return 0;
-		return mask.lit[y * mask.width + x];
+		if (!this.#mask || !this.#info?.traced || !this.#root) return null;
+		const level = this.#cover.litAt(point.x, point.y);
+		return level < 0 ? null : level;
 	}
 
 	/** Follows a change of a switch or a number the picture depends on. */
@@ -285,9 +282,8 @@ export class PathTracedLighting {
 			const { min = 0, max = 1 } = config.darkness ?? {};
 			if (darkness < min || darkness > max) return;
 			const rgb = config.color?.rgb ?? (config.color ? foundry.utils.Color?.from(config.color)?.rgb : null);
-			const strength = Math.min(Math.max(config.alpha ?? 0.5, 0), 1);
-			lights.push({ x: at.x, y: at.y, z: Math.round(at.z * 100) / 100, radius, bright: Math.min(Math.abs(config.bright ?? 0) * per + (more.externalRadius ?? 0), radius),
-				color: rgb ? Array.from(rgb, (c) => 1 + (c - 1) * strength) : [1, 1, 1], walls: more.walls !== false, angle: config.angle ?? 360, rotation: more.rotation ?? 0,
+			lights.push({ x: at.x, y: at.y, z: Math.round(at.z * 100) / 100, radius, bright: Math.abs(config.bright ?? 0) * per + (more.externalRadius ?? 0),
+				color: rgb ? Array.from(rgb) : [1, 1, 1], strength: config.alpha ?? 0.5, walls: more.walls !== false, angle: config.angle ?? 360, rotation: more.rotation ?? 0,
 				attenuation: config.attenuation ?? 0.5, externalRadius: more.externalRadius ?? 0, reflectedOnly: false, dimLevel });
 		};
 		for (const light of scene?.lights ?? []) {
@@ -307,10 +303,9 @@ export class PathTracedLighting {
 	/** A light source as the script takes it. */
 	#describe(source) {
 		const data = source.data;
-		// the opacity of a light's color says how much of the color its light has
-		const strength = Math.min(Math.max(data.alpha ?? 0.5, 0), 1);
-		const color = source.colorRGB ? Array.from(source.colorRGB, (c) => 1 + (c - 1) * strength) : [1, 1, 1];
-		return { x: data.x, y: data.y, z: Math.round(lightHeight(source) * 100) / 100, radius: data.radius, bright: Math.min(Math.abs(data.bright ?? 0), data.radius), color,
+		return { x: data.x, y: data.y, z: Math.round(lightHeight(source) * 100) / 100, radius: data.radius, bright: data.bright ?? 0,
+			// the opacity of a light's color says how much of the color its light has
+			color: source.colorRGB ? Array.from(source.colorRGB) : [1, 1, 1], strength: data.alpha ?? 0.5,
 			walls: data.walls !== false, angle: data.angle ?? 360, rotation: data.rotation ?? 0, attenuation: data.attenuation ?? 0.5,
 			externalRadius: data.externalRadius ?? 0,
 			// an animated source keeps its own meshes for the light that comes straight from it
@@ -361,7 +356,7 @@ export class PathTracedLighting {
 	}
 
 	#trace(sources, picture, draft) {
-		const info = { count: sources.length, walls: 0, ms: 0, error: '', traced: false, draft, lights: sources.map(({ x, y, z, color }) => ({ x, y, z, color })) };
+		const info = { count: sources.length, walls: 0, ms: 0, error: '', traced: false, draft, lights: sources.map(({ x, y, z, color, strength }) => ({ x, y, z, color, strength })) };
 		const started = performance.now();
 		try {
 			// The other levels first: the picture of the viewed level is the one that has to be
@@ -392,40 +387,23 @@ export class PathTracedLighting {
 	}
 
 	/**
-	 * Works out from the picture the script has just drawn where its light counts as lit, and
-	 * fills the picture for the vision mask there. Foundry draws its vision mask in red.
+	 * Has the library work out from the picture it has just drawn where its light counts as lit,
+	 * and puts its picture of the lit places on the canvas for the vision mask. Foundry draws its
+	 * vision mask in red, and so is that picture.
 	 */
 	#readLit(sources) {
-		const { width, height, data } = this.#cover.readPicture();
 		// how bright dim light looks in the picture, and the share of it that counts as lit
-		const dimLevel = sources[0]?.dimLevel ?? 0.25;
-		const least = Math.max(1, Math.round(255 * dimLevel * value('litLevel')));
-		// half way from how bright dim light looks to how bright bright light does
-		const bright = Math.round(255 * (dimLevel + 1) / 2);
+		const read = this.#cover.litMap(sources[0]?.dimLevel ?? 0.25, value('litLevel'));
+		if (!read) return;
+		const { width, height } = read;
 		let mask = this.#mask;
 		if (!mask || mask.width !== width || mask.height !== height) {
 			const made = document.createElement('canvas');
 			made.width = width;
 			made.height = height;
-			mask = this.#mask = { width, height, lit: new Uint8Array(width * height), canvas: made,
-				context: made.getContext('2d'), texture: mask?.texture ?? null, sprite: mask?.sprite ?? null };
+			mask = this.#mask = { width, height, canvas: made, context: made.getContext('2d'), texture: mask?.texture ?? null, sprite: mask?.sprite ?? null };
 		}
-		const image = mask.context.createImageData(width, height);
-		for (let y = 0; y < height; y++) {
-			// the script's picture comes bottom row first
-			let from = (height - 1 - y) * width * 4;
-			let to = y * width;
-			for (let x = 0; x < width; x++, from += 4, to++) {
-				const most = Math.max(data[from], data[from + 1], data[from + 2]);
-				const lit = most >= least;
-				mask.lit[to] = most >= bright ? 2 : (lit ? 1 : 0);
-				if (lit) {
-					image.data[to * 4] = 255;
-					image.data[to * 4 + 3] = 255;
-				}
-			}
-		}
-		mask.context.putImageData(image, 0, 0);
+		mask.context.putImageData(new ImageData(read.image, width, height), 0, 0);
 		this.#maskSprite();
 		mask.texture.baseTexture.update();
 	}

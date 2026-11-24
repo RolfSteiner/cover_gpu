@@ -9,7 +9,11 @@
 //            files), which library.html compares the new one against where it has to give the
 //            same answers; without it those comparisons are left out;
 //   foundry  the folder of a Foundry installation, which module.html takes PIXI and the
-//            quadtree class from.
+//            quadtree class from;
+//   before   the folder of a checkout of an earlier state of this repository, with its library
+//            built: module.html?module=/before/module runs that module in place of this one,
+//            for scenario.mjs to compare the two. The stand-ins for PF2E Visioner have to be
+//            served for it as well: before/pf2e-visioner=<this repository>/test/visioner.
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
